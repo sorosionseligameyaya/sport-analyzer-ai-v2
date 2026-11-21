@@ -7,7 +7,7 @@ const FOOTBALL_DATA_TOKEN = process.env.FOOTBALL_DATA_TOKEN;
 const API_BASE = 'https://api.football-data.org/v4';
 
 if (!BOT_TOKEN || !FOOTBALL_DATA_TOKEN) {
-  throw new Error('BOT_TOKEN ou FOOTBALL_DATA_TOKEN manquant dans Render.');
+  throw new Error('BOT_TOKEN ou FOOTBALL_DATA_TOKEN manquant.');
 }
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -20,7 +20,7 @@ app.get('/', (req, res) => {
   res.send('Sport Analyzer AI V2 fonctionne ⚽');
 });
 
-// Connexion à l'API football-data.org
+// API FOOTBALL
 async function apiGet(path) {
   const response = await fetch(API_BASE + path, {
     headers: {
@@ -35,39 +35,69 @@ async function apiGet(path) {
   return response.json();
 }
 
-// Recherche d'équipe avec mise en cache
+// CACHE DES EQUIPES
 let teamsCache = null;
 let teamsCacheTime = 0;
 
-async function getTeamByName(name) {
+async function getTeams() {
   if (!teamsCache || Date.now() - teamsCacheTime > 600000) {
-    teamsCache = await apiGet('/teams?limit=100');
+    teamsCache = await apiGet('/teams?limit=500');
     teamsCacheTime = Date.now();
   }
 
-  const teams = teamsCache.teams || [];
+  return teamsCache.teams || [];
+}
+
+// RECHERCHE D'EQUIPE
+async function getTeamByName(name) {
+  const teams = await getTeams();
   const wanted = name.trim().toLowerCase();
 
-  let team = teams.find(
-    t => (t.name || '').toLowerCase() === wanted
+  const aliases = {
+    'barcelona': ['fc barcelona', 'barca', 'barça'],
+    'barca': ['fc barcelona', 'barcelona', 'barça'],
+    'barça': ['fc barcelona', 'barcelona', 'barca'],
+    'real madrid': ['real madrid cf'],
+    'manchester city': ['man city'],
+    'manchester united': ['man utd'],
+    'psg': ['paris saint-germain', 'paris sg'],
+    'inter': ['inter milan', 'fc internazionale'],
+    'ac milan': ['milan'],
+    'atletico madrid': ['atlético madrid', 'atletico'],
+    'bayern': ['fc bayern münchen', 'bayern munich'],
+    'dortmund': ['borussia dortmund'],
+    'chelsea': ['chelsea fc'],
+    'arsenal': ['arsenal fc'],
+    'liverpool': ['liverpool fc'],
+    'tottenham': ['tottenham hotspur'],
+    'juventus': ['juventus fc', 'juve']
+  };
+
+  const names = [wanted, ...(aliases[wanted] || [])];
+
+  let team = teams.find(t =>
+    names.includes((t.name || '').toLowerCase()) ||
+    names.includes((t.shortName || '').toLowerCase()) ||
+    names.includes((t.tla || '').toLowerCase())
   );
 
   if (!team) {
-    team = teams.find(
-      t =>
-        (t.shortName || '').toLowerCase() === wanted ||
-        (t.tla || '').toLowerCase() === wanted
+    team = teams.find(t =>
+      names.some(n =>
+        (t.name || '').toLowerCase().includes(n) ||
+        (t.shortName || '').toLowerCase().includes(n)
+      )
     );
   }
 
   if (!team) {
-    throw new Error(`Équipe introuvable : ${name}. Essaie son nom officiel.`);
+    throw new Error(`Équipe introuvable : ${name}`);
   }
 
   return team;
 }
 
-// Récupération des derniers matchs
+// DERNIERS MATCHS
 async function getLastMatches(teamId, limit = 5) {
   const data = await apiGet(
     `/teams/${teamId}/matches?status=FINISHED&limit=${limit}`
@@ -76,18 +106,15 @@ async function getLastMatches(teamId, limit = 5) {
   return (data.matches || []).slice(-limit).reverse();
 }
 
-// Calcul des résultats
+// RESULTAT D'UN MATCH
 function matchResultForTeam(match, teamId) {
   const homeId = match.homeTeam?.id;
-  const awayId = match.awayTeam?.id;
-
   const home = match.score?.fullTime?.home;
   const away = match.score?.fullTime?.away;
 
   if (home == null || away == null) return null;
 
   const isHome = homeId === teamId;
-
   const goalsFor = isHome ? home : away;
   const goalsAgainst = isHome ? away : home;
 
@@ -103,7 +130,7 @@ function matchResultForTeam(match, teamId) {
   };
 }
 
-// Statistiques sur les 5 matchs
+// CALCUL DES STATISTIQUES
 function summarizeMatches(team, matches) {
   const rows = matches
     .map(m => matchResultForTeam(m, team.id))
@@ -128,7 +155,7 @@ function summarizeMatches(team, matches) {
   };
 }
 
-// Présentation des statistiques
+// PRESENTATION
 function summaryText(team, stats) {
   const form = stats.rows.map(r => r.result).join(' - ') || 'N/D';
 
@@ -145,6 +172,7 @@ function summaryText(team, stats) {
   );
 }
 
+// ANALYSE D'EQUIPE
 async function analyzeTeam(name) {
   const team = await getTeamByName(name);
   const matches = await getLastMatches(team.id, 5);
@@ -155,7 +183,7 @@ async function analyzeTeam(name) {
   };
 }
 
-// Comparaison de deux équipes
+// COMPARAISON
 async function analyzeMatch(ctx, matchText) {
   const parts = matchText.split(/\s+vs\.?\s+|\s+-\s+/i);
 
@@ -184,7 +212,7 @@ async function analyzeMatch(ctx, matchText) {
       `${summaryText(a.team, a.stats)}\n\n` +
       `────────────\n\n` +
       `${summaryText(b.team, b.stats)}\n\n` +
-      `ℹ️ Analyse basée sur les données disponibles de football-data.org.`
+      `ℹ️ Analyse basée sur les données disponibles.`
     );
 
   } catch (err) {
@@ -198,7 +226,7 @@ async function analyzeMatch(ctx, matchText) {
   }
 }
 
-// Accueil
+// ACCUEIL
 bot.start((ctx) => {
   ctx.reply(
     '⚽ Bienvenue sur Sport Analyzer AI V2 !\n\n' +
@@ -213,7 +241,7 @@ bot.start((ctx) => {
   );
 });
 
-// Aide
+// AIDE
 bot.help((ctx) => {
   ctx.reply(
     '⚽ SPORT ANALYZER AI V2\n\n' +
@@ -222,11 +250,11 @@ bot.help((ctx) => {
     '/forme Real Madrid\n' +
     'Analyser la forme récente.\n\n' +
     '/live\n' +
-    'Voir les matchs en direct disponibles.'
+    'Voir les matchs en direct.'
   );
 });
 
-// Commande FOOT
+// COMMANDE FOOT
 bot.command('foot', (ctx) => {
   const match = ctx.message.text.replace(/^\/foot\s*/i, '').trim();
 
@@ -243,7 +271,7 @@ bot.command('foot', (ctx) => {
   );
 });
 
-// Commande FORME
+// COMMANDE FORME
 bot.command('forme', async (ctx) => {
   const name = ctx.message.text.replace(/^\/forme\s*/i, '').trim();
 
@@ -270,7 +298,7 @@ bot.command('forme', async (ctx) => {
   }
 });
 
-// Commande LIVE
+// COMMANDE LIVE
 bot.command('live', async (ctx) => {
   await ctx.reply('🔴 Recherche des matchs en direct…');
 
@@ -312,7 +340,7 @@ bot.command('live', async (ctx) => {
   }
 });
 
-// Messages reçus
+// MESSAGES
 bot.on('text', (ctx) => {
   const message = ctx.message.text.trim();
 
@@ -344,12 +372,12 @@ bot.on('text', (ctx) => {
   );
 });
 
-// Gestion des erreurs
+// ERREURS
 bot.catch((err) => {
   console.error('Erreur Telegram :', err);
 });
 
-// Démarrage du serveur
+// SERVEUR
 app.listen(process.env.PORT || 3000, () => {
   console.log('Sport Analyzer AI V2 démarré.');
 });
