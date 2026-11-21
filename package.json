@@ -1,0 +1,14 @@
+
+{
+  "name": "sport-analyzer-ai-v2",
+  "version": "1.0.0",
+  "description": "Bot Telegram d'analyse football",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "telegraf": "^4.16.3"
+  }
+}
