@@ -12,7 +12,7 @@ const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
 app.use(express.json());
-bot.use(session());
+;bot.use(session({ defaultSession: () => ({}) }));
 
 app.get('/', (req, res) => {
   res.send('Sport Analyzer AI V2 fonctionne ⚽');
