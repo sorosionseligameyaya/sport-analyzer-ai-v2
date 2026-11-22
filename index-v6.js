@@ -1,3 +1,4 @@
+
 'use strict';
 
 const express = require('express');
@@ -27,7 +28,9 @@ const COMPETITIONS = ['PL', 'PD', 'BL1', 'SA', 'FL1', 'CL', 'ELC', 'PPL', 'DED']
 const cache = new Map();
 
 async function footballData(path) {
-  if (!FOOTBALL_DATA_TOKEN) throw new Error('FOOTBALL_DATA_TOKEN absent sur Render.');
+  if (!FOOTBALL_DATA_TOKEN) {
+    throw new Error('FOOTBALL_DATA_TOKEN absent sur Render.');
+  }
 
   const r = await fetch(`${API_BASE}${path}`, {
     headers: { 'X-Auth-Token': FOOTBALL_DATA_TOKEN }
@@ -76,6 +79,8 @@ function normalize(s) {
 
 function findTeam(name, teams) {
   const n = normalize(name);
+
+  if (!n) return null;
 
   return teams.find(t =>
     normalize(t.name) === n ||
@@ -319,6 +324,10 @@ function dateOffset(offset) {
   return abidjanDate(d);
 }
 
+/* =========================
+   MATCHS EN DIRECT
+========================= */
+
 async function liveMatches() {
   const data = await apiFootball('/fixtures?live=all');
 
@@ -343,36 +352,21 @@ function liveText(matches) {
 
     const elapsed = m.fixture?.status?.elapsed;
     const status = m.fixture?.status?.short;
-    const minute = elapsed != null ? `${elapsed}'` :
-      status === 'HT' ? 'Mi-temps' : status;
+
+    const minute = elapsed != null
+      ? `${elapsed}'`
+      : status === 'HT'
+        ? 'Mi-temps'
+        : status;
 
     return `🔴 ${minute}
 ${home} ${homeGoals} - ${awayGoals} ${away}`;
   }).join('\n\n');
 }
 
-  return (data.matches || []).filter(m =>
-    ['IN_PLAY', 'PAUSED', 'LIVE'].includes(m.status)
-  );
-}
-
-function liveText(matches) {
-  if (!matches.length) {
-    return '🔴 Aucun match en direct trouvé par la source actuellement.';
-  }
-
-  return matches.slice(0, 25).map(m => {
-    const score = `${m.score?.fullTime?.home ?? m.score?.halfTime?.home ?? 0} - ${m.score?.fullTime?.away ?? m.score?.halfTime?.away ?? 0}`;
-
-    const minute = m.minute
-      ? `${m.minute}'`
-      : m.status === 'PAUSED'
-        ? 'MT'
-        : m.status;
-
-    return `🔴 ${minute} | ${m.homeTeam.name} ${score} ${m.awayTeam.name}`;
-  }).join('\n');
-}
+/* =========================
+   MATCHS ET COTES
+========================= */
 
 function oddsFormat(n) {
   return Number(n).toFixed(2);
@@ -491,6 +485,10 @@ Bookmaker : ${p.bookmaker}
 ⚠️ Les cotes peuvent changer. Cette sélection n'est pas une garantie.`;
 }
 
+/* =========================
+   AIDE
+========================= */
+
 function helpText() {
   return `🤖 SPORT ANALYZER AI
 
@@ -517,6 +515,10 @@ function parseTwoTeams(text) {
     ? [parts[0].trim(), parts.slice(1).join(' ').trim()]
     : null;
 }
+
+/* =========================
+   COMMANDES TELEGRAM
+========================= */
 
 bot.start(ctx =>
   ctx.reply('👋 Bienvenue sur SPORT ANALYZER AI.\n\nUtilise /help pour voir les commandes.')
@@ -614,3 +616,4 @@ bot.launch()
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+      
