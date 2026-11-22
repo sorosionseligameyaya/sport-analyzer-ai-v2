@@ -1138,3 +1138,7 @@ RÈGLES STRICTES :
     return null;
   }
 }
+bot.launch()
+  .then(() => {
+    console.log('SPORT ANALYZER AI démarré.');
+  })
