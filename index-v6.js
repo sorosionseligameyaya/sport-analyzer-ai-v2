@@ -928,3 +928,74 @@ async function askAI(prompt) {
     return null;
   }
 }
+// ======================================
+// CERVEAU IA - OPENROUTER
+// ======================================
+
+async function askAI(prompt) {
+  const key = process.env.OPENROUTER_API_KEY;
+
+  if (!key) {
+    console.error('Clé OPENROUTER_API_KEY absente.');
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+          messages: [
+            {
+              role: 'system',
+              content: `Tu es SPORT ANALYZER AI, un analyste expert du football.
+
+Tu analyses uniquement les données qui te sont fournies.
+
+Tu dois :
+- Analyser la forme récente.
+- Examiner les performances offensives.
+- Examiner les faiblesses défensives.
+- Identifier les tendances de buts.
+- Détecter les signaux contradictoires.
+- Évaluer les risques d'analyse.
+- Distinguer les faits des hypothèses.
+
+Tu ne dois jamais inventer de statistiques, de résultats, de blessures, de compositions ou de probabilités.
+
+Si les données sont insuffisantes, dis-le clairement.
+
+Réponds en français, de manière claire, structurée et professionnelle.`
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.2,
+          max_tokens: 700
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Erreur OpenRouter:', response.status, errorText);
+      return null;
+    }
+
+    const data = await response.json();
+
+    return data.choices?.[0]?.message?.content || null;
+
+  } catch (error) {
+    console.error('Erreur cerveau IA:', error.message);
+    return null;
+  }
+}
