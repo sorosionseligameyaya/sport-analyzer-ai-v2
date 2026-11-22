@@ -3,6 +3,7 @@
 
 const express = require('express');
 const { Telegraf } = require('telegraf');
+const fifaEngine = require('./fifa-engine');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const FOOTBALL_DATA_TOKEN = process.env.FOOTBALL_DATA_TOKEN;
@@ -324,9 +325,7 @@ function dateOffset(offset) {
   return abidjanDate(d);
 }
 
-/* =========================
-   MATCHS EN DIRECT
-========================= */
+/* MATCHS EN DIRECT */
 
 async function liveMatches() {
   const data = await apiFootball('/fixtures?live=all');
@@ -364,9 +363,7 @@ ${home} ${homeGoals} - ${awayGoals} ${away}`;
   }).join('\n\n');
 }
 
-/* =========================
-   MATCHS ET COTES
-========================= */
+/* MATCHS ET COTES */
 
 function oddsFormat(n) {
   return Number(n).toFixed(2);
@@ -485,9 +482,7 @@ Bookmaker : ${p.bookmaker}
 ⚠️ Les cotes peuvent changer. Cette sélection n'est pas une garantie.`;
 }
 
-/* =========================
-   AIDE
-========================= */
+/* AIDE */
 
 function helpText() {
   return `🤖 SPORT ANALYZER AI
@@ -516,9 +511,7 @@ function parseTwoTeams(text) {
     : null;
 }
 
-/* =========================
-   COMMANDES TELEGRAM
-========================= */
+/* COMMANDES TELEGRAM */
 
 bot.start(ctx =>
   ctx.reply('👋 Bienvenue sur SPORT ANALYZER AI.\n\nUtilise /help pour voir les commandes.')
@@ -594,9 +587,31 @@ bot.command('cotes', async ctx => {
   }
 });
 
-bot.command('fifa', ctx =>
-  ctx.reply('🎮 MODULE FOOTBALL VIRTUEL\n\nLe module FIFA/eFootball est encore en préparation. Les données de matchs virtuels ne sont pas connectées, donc je ne fournirai pas de faux scores ou de fausses cotes.')
-);
+bot.command('fifa', async ctx => {
+  // Le moteur est chargé, mais aucune source virtuelle vérifiée n'est connectée.
+  const statusCheck = fifaEngine.classifyStatus('NS');
+
+  const sample = fifaEngine.normalizeMatch({
+    home: 'Équipe A',
+    away: 'Équipe B',
+    status: 'NS'
+  });
+
+  if (!sample || statusCheck !== 'PREMATCH') {
+    return ctx.reply('⚠️ Le moteur FIFA n’a pas pu être initialisé.');
+  }
+
+  return ctx.reply(
+    '🎮 SPORT ANALYZER AI — FIFA / eFOOTBALL\n\n' +
+    '✅ Moteur d’analyse chargé.\n' +
+    '✅ Normalisation des matchs et vérification des cotes activées.\n' +
+    '⚠️ Connexion automatique à 1xBet : non disponible pour le moment.\n\n' +
+    'Pour produire une analyse fiable, il faut recevoir le match et au moins 5 résultats terminés par équipe depuis une source vérifiée.\n' +
+    'Sans ces données, le bot ne donnera ni pronostic, ni score, ni cote inventés.\n\n' +
+    'Formats et compétitions : le module pourra traiter les formats fournis par la source (FC25, FC26, Rush, 3x3, 4x4, penalties, etc.).\n' +
+    'État : moteur prêt, source de données à connecter.'
+  );
+});
 
 bot.on('text', ctx =>
   ctx.reply('Commande non reconnue. Utilise /help pour voir les commandes.')
@@ -616,4 +631,4 @@ bot.launch()
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-      
+    
