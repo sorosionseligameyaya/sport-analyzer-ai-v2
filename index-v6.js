@@ -11,6 +11,9 @@ const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openrouter/free';
 
+const PULSESCORE_API_KEY = process.env.PULSESCORE_API_KEY;
+const PULSESCORE_BASE = 'https://api.pulsescore.net/api/onexbet';
+
 const API_BASE = 'https://api.football-data.org/v4';
 const API_FOOTBALL_BASE = 'https://v3.football.api-sports.io';
 
@@ -19,13 +22,209 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN manquant dans Render.');
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-app.get('/', (_req, res) => res.status(200).send('SPORT ANALYZER AI fonctionne.'));
-app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
+app.get('/', (_req, res) =>
+  res.status(200).send('SPORT ANALYZER AI fonctionne.')
+);
+
+app.get('/health', (_req, res) =>
+  res.status(200).json({
+    ok: true,
+    fifaEngine: true,
+    pulseScoreConfigured: Boolean(PULSESCORE_API_KEY)
+  })
+);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Serveur démarré sur ${PORT}`));
 
-const COMPETITIONS = ['PL', 'PD', 'BL1', 'SA', 'FL1', 'CL', 'ELC', 'PPL', 'DED'];
+app.listen(PORT, () =>
+  console.log(`Serveur démarré sur ${PORT}`)
+);
+
+/* =====================================================
+   PULSESCORE — CONNEXION API 1XBET
+===================================================== */
+
+async function pulseRequest(path) {
+  if (!PULSESCORE_API_KEY) {
+    throw new Error('PULSESCORE_API_KEY absente sur Render.');
+  }
+
+  const response = await fetch(`${PULSESCORE_BASE}${path}`, {
+    method: 'GET',
+    headers: {
+      'x-secret': PULSESCORE_API_KEY,
+      'Accept': 'application/json',
+      'Accept-Encoding': 'gzip'
+    },
+    signal: AbortSignal.timeout(20000)
+  });
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `PulseScore HTTP ${response.status}: ${body.slice(0, 180)}`
+    );
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error('Réponse PulseScore non valide en JSON.');
+  }
+}
+
+function extractEvents(data) {
+  if (Array.isArray(data)) return data;
+
+  if (Array.isArray(data?.events)) return data.events;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+
+  return [];
+}
+
+function getEventName(event) {
+  return [
+    event?.home,
+    event?.away,
+    event?.league,
+    event?.competition,
+    event?.name,
+    event?.sport
+  ].filter(Boolean).join(' ');
+}
+
+function isPotentialVirtual(event) {
+  const text = getEventName(event).toLowerCase();
+
+  return /fc\s?25|fc\s?26|fc\s?24|efootball|e-football|fifa|rush|3x3|4x4|penalt|esport|cyber|virtual/.test(text);
+}
+
+function formatEvent(event) {
+  const home = event.home || event.homeTeam || 'Équipe inconnue';
+  const away = event.away || event.awayTeam || 'Équipe inconnue';
+  const league = event.league || event.competition || 'Compétition inconnue';
+
+  const score = event.score
+    ? `${event.score.home ?? '?'}-${event.score.away ?? '?'}`
+    : 'Score non disponible';
+
+  return `${home} - ${away}\nCompétition : ${league}\nScore : ${score}`;
+}
+
+async function pulseDiagnostic() {
+  const tests = [
+    {
+      name: 'Football avant-match',
+      path: '/soccer/events?page=1&limit=30'
+    },
+    {
+      name: 'Football en direct',
+      path: '/live-events?sport=soccer&page=1&limit=30'
+    },
+    {
+      name: 'Résultats terminés',
+      path: '/results?sport=soccer&page=1&limit=30'
+    },
+    {
+      name: 'E-sport avant-match',
+      path: '/esports/events?page=1&limit=30'
+    },
+    {
+      name: 'Sports avec résultats',
+      path: '/results/sports'
+    }
+  ];
+
+  const reports = [];
+  const collections = {};
+
+  for (const test of tests) {
+    try {
+      const data = await pulseRequest(test.path);
+      const events = extractEvents(data);
+
+      collections[test.name] = events;
+
+      reports.push(
+        `✅ ${test.name} : ${events.length} élément(s) reçu(s).`
+      );
+
+    } catch (error) {
+      collections[test.name] = [];
+
+      reports.push(
+        `❌ ${test.name} : ${error.message}`
+      );
+    }
+  }
+
+  const prematch = collections['Football avant-match'] || [];
+  const live = collections['Football en direct'] || [];
+  const results = collections['Résultats terminés'] || [];
+  const esports = collections['E-sport avant-match'] || [];
+
+  const allEvents = [
+    ...prematch,
+    ...live,
+    ...results,
+    ...esports
+  ];
+
+  const virtualEvents = allEvents.filter(isPotentialVirtual);
+
+  const uniqueVirtual = [
+    ...new Map(
+      virtualEvents.map(event => [
+        String(event.eventId || event.id || getEventName(event)),
+        event
+      ])
+    ).values()
+  ];
+
+  let output =
+    '🎮 DIAGNOSTIC PULSESCORE — 1XBET\n\n' +
+    reports.join('\n');
+
+  output +=
+    '\n\n📊 DÉTECTION DES MATCHS VIRTUELS\n' +
+    `Événements examinés : ${allEvents.length}\n` +
+    `Événements correspondant aux mots-clés virtuels : ${uniqueVirtual.length}\n`;
+
+  if (uniqueVirtual.length) {
+    output += '\n🎮 ÉVÉNEMENTS À VÉRIFIER :\n\n';
+
+    output += uniqueVirtual
+      .slice(0, 8)
+      .map((event, index) =>
+        `${index + 1}. ${formatEvent(event)}`
+      )
+      .join('\n\n');
+
+  } else {
+    output +=
+      '\n⚠️ Aucun événement virtuel identifiable dans les résultats reçus.\n' +
+      'Cela ne prouve pas que PulseScore ne les possède pas : ' +
+      'ils peuvent être absents actuellement ou utiliser d’autres noms.';
+  }
+
+  output +=
+    '\n\n⚠️ Ce diagnostic vérifie la connexion et les données reçues. ' +
+    'Il ne constitue pas encore une analyse prédictive.';
+
+  return output;
+}
+
+/* =====================================================
+   FOOTBALL DATA
+===================================================== */
+
+const COMPETITIONS = [
+  'PL', 'PD', 'BL1', 'SA', 'FL1',
+  'CL', 'ELC', 'PPL', 'DED'
+];
+
 const cache = new Map();
 
 async function footballData(path) {
@@ -33,12 +232,17 @@ async function footballData(path) {
     throw new Error('FOOTBALL_DATA_TOKEN absent sur Render.');
   }
 
-  const r = await fetch(`${API_BASE}${path}`, {
-    headers: { 'X-Auth-Token': FOOTBALL_DATA_TOKEN }
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      'X-Auth-Token': FOOTBALL_DATA_TOKEN
+    }
   });
 
-  if (!r.ok) throw new Error(`Football-data HTTP ${r.status}`);
-  return r.json();
+  if (!response.ok) {
+    throw new Error(`Football-data HTTP ${response.status}`);
+  }
+
+  return response.json();
 }
 
 async function getTeams() {
@@ -54,22 +258,25 @@ async function getTeams() {
     try {
       const data = await footballData(`/competitions/${code}/teams`);
       all.push(...(data.teams || []));
-    } catch (e) {
-      console.warn(`Équipes ${code}: ${e.message}`);
+    } catch (error) {
+      console.warn(`Équipes ${code}: ${error.message}`);
     }
   }
 
-  const unique = [...new Map(all.map(t => [t.id, t])).values()];
+  const unique = [...new Map(all.map(team => [team.id, team])).values()];
 
   if (unique.length) {
-    cache.set('teams', { time: Date.now(), data: unique });
+    cache.set('teams', {
+      time: Date.now(),
+      data: unique
+    });
   }
 
   return unique;
 }
 
-function normalize(s) {
-  return String(s || '')
+function normalize(value) {
+  return String(value || '')
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -79,17 +286,17 @@ function normalize(s) {
 }
 
 function findTeam(name, teams) {
-  const n = normalize(name);
+  const normalized = normalize(name);
 
-  if (!n) return null;
+  if (!normalized) return null;
 
-  return teams.find(t =>
-    normalize(t.name) === n ||
-    normalize(t.shortName) === n ||
-    normalize(t.tla) === n
-  ) || teams.find(t =>
-    normalize(t.name).includes(n) ||
-    normalize(t.shortName || '').includes(n)
+  return teams.find(team =>
+    normalize(team.name) === normalized ||
+    normalize(team.shortName) === normalized ||
+    normalize(team.tla) === normalized
+  ) || teams.find(team =>
+    normalize(team.name).includes(normalized) ||
+    normalize(team.shortName || '').includes(normalized)
   );
 }
 
@@ -113,16 +320,16 @@ function calcStats(matches, teamId) {
   let over25 = 0;
   let btts = 0;
 
-  for (const m of matches) {
-    const home = m.homeTeam.id === teamId;
+  for (const match of matches) {
+    const home = match.homeTeam.id === teamId;
 
     const gf = home
-      ? m.score.fullTime.home
-      : m.score.fullTime.away;
+      ? match.score.fullTime.home
+      : match.score.fullTime.away;
 
     const ga = home
-      ? m.score.fullTime.away
-      : m.score.fullTime.home;
+      ? match.score.fullTime.away
+      : match.score.fullTime.home;
 
     if (gf == null || ga == null) continue;
 
@@ -156,28 +363,32 @@ function calcStats(matches, teamId) {
   };
 }
 
-function statsText(name, s) {
+function statsText(name, stats) {
   return `📊 ${name} — 5 derniers matchs
 
-Matchs analysés : ${s.played}
-Victoires : ${s.wins}
-Nuls : ${s.draws}
-Défaites : ${s.losses}
-Buts marqués : ${s.goalsFor}
-Buts encaissés : ${s.goalsAgainst}
-Moyenne buts marqués/match : ${s.avgFor}
-Moyenne buts encaissés/match : ${s.avgAgainst}
-Matchs avec +1,5 but : ${s.over15}
-Matchs avec +2,5 buts : ${s.over25}
-Matchs où les deux équipes marquent : ${s.btts}
-Clean sheets : ${s.cleanSheets}`;
+Matchs analysés : ${stats.played}
+Victoires : ${stats.wins}
+Nuls : ${stats.draws}
+Défaites : ${stats.losses}
+Buts marqués : ${stats.goalsFor}
+Buts encaissés : ${stats.goalsAgainst}
+Moyenne buts marqués/match : ${stats.avgFor}
+Moyenne buts encaissés/match : ${stats.avgAgainst}
+Matchs avec +1,5 but : ${stats.over15}
+Matchs avec +2,5 buts : ${stats.over25}
+Matchs où les deux équipes marquent : ${stats.btts}
+Clean sheets : ${stats.cleanSheets}`;
 }
+
+/* =====================================================
+   OPENROUTER
+===================================================== */
 
 async function askAI(prompt) {
   if (!OPENROUTER_API_KEY) return null;
 
   try {
-    const r = await fetch(
+    const response = await fetch(
       'https://openrouter.ai/api/v1/chat/completions',
       {
         method: 'POST',
@@ -190,12 +401,13 @@ async function askAI(prompt) {
           messages: [
             {
               role: 'system',
-              content: `Tu es SPORT ANALYZER AI, analyste football.
-Analyse uniquement les données fournies.
-N'invente jamais de statistiques, résultats, probabilités ou cotes.
-Mentionne les limites des données.
-Réponds en français, de façon claire et professionnelle.
-Tes analyses ne garantissent aucun résultat.`
+              content:
+                'Tu es SPORT ANALYZER AI, analyste football. ' +
+                'Analyse uniquement les données fournies. ' +
+                'N’invente jamais de statistiques, résultats, probabilités ou cotes. ' +
+                'Mentionne les limites des données. ' +
+                'Réponds en français, clairement et professionnellement. ' +
+                'Tes analyses ne garantissent aucun résultat.'
             },
             {
               role: 'user',
@@ -208,17 +420,21 @@ Tes analyses ne garantissent aucun résultat.`
       }
     );
 
-    if (!r.ok) {
-      console.error('OpenRouter:', r.status, await r.text());
+    if (!response.ok) {
+      console.error(
+        'OpenRouter:',
+        response.status,
+        await response.text()
+      );
       return null;
     }
 
-    const data = await r.json();
+    const data = await response.json();
 
     return data.choices?.[0]?.message?.content?.trim() || null;
 
-  } catch (e) {
-    console.error('Erreur IA:', e.message);
+  } catch (error) {
+    console.error('Erreur IA:', error.message);
     return null;
   }
 }
@@ -232,18 +448,17 @@ async function teamReport(name) {
   }
 
   const matches = await getLastMatches(team.id);
-  const s = calcStats(matches, team.id);
+  const stats = calcStats(matches, team.id);
 
-  if (!s.played) {
+  if (!stats.played) {
     return `Pas de résultats récents disponibles pour ${team.name}.`;
   }
 
-  const base = statsText(team.name, s);
+  const base = statsText(team.name, stats);
 
   const ai = await askAI(
-    `Analyse la forme récente de ${team.name} à partir des statistiques suivantes. Décris forme, attaque, défense, tendances de buts et risques, sans créer de chiffres.
-
-${base}`
+    `Analyse la forme récente de ${team.name} à partir des statistiques suivantes. ` +
+    `Décris forme, attaque, défense, tendances de buts et risques, sans créer de chiffres.\n\n${base}`
   );
 
   return ai
@@ -263,26 +478,24 @@ async function compareTeams(names) {
 Équipe 2 : ${names[1]}`;
   }
 
-  const [ma, mb] = await Promise.all([
+  const [matchesA, matchesB] = await Promise.all([
     getLastMatches(a.id),
     getLastMatches(b.id)
   ]);
 
-  const sa = calcStats(ma, a.id);
-  const sb = calcStats(mb, b.id);
+  const statsA = calcStats(matchesA, a.id);
+  const statsB = calcStats(matchesB, b.id);
 
-  if (!sa.played || !sb.played) {
+  if (!statsA.played || !statsB.played) {
     return 'Données récentes insuffisantes pour comparer ces équipes.';
   }
 
-  const base = `${statsText(a.name, sa)}
-
-${statsText(b.name, sb)}`;
+  const base =
+    `${statsText(a.name, statsA)}\n\n${statsText(b.name, statsB)}`;
 
   const ai = await askAI(
-    `Compare les équipes en restant prudent et sans inventer. Évalue forme, attaque, défense, tendances de buts et facteurs de risque. Ne donne pas de certitude.
-
-${base}`
+    `Compare les équipes en restant prudent et sans inventer. ` +
+    `Évalue forme, attaque, défense, tendances de buts et facteurs de risque.\n\n${base}`
   );
 
   return ai
@@ -290,18 +503,26 @@ ${base}`
     : `${base}\n\nIA indisponible pour le moment.`;
 }
 
+/* =====================================================
+   API-FOOTBALL
+===================================================== */
+
 async function apiFootball(path) {
   if (!API_FOOTBALL_KEY) {
     throw new Error('API_FOOTBALL_KEY absente sur Render.');
   }
 
-  const r = await fetch(`${API_FOOTBALL_BASE}${path}`, {
-    headers: { 'x-apisports-key': API_FOOTBALL_KEY }
+  const response = await fetch(`${API_FOOTBALL_BASE}${path}`, {
+    headers: {
+      'x-apisports-key': API_FOOTBALL_KEY
+    }
   });
 
-  if (!r.ok) throw new Error(`API-Football HTTP ${r.status}`);
+  if (!response.ok) {
+    throw new Error(`API-Football HTTP ${response.status}`);
+  }
 
-  const data = await r.json();
+  const data = await response.json();
 
   if (data.errors && Object.keys(data.errors).length) {
     throw new Error(JSON.stringify(data.errors));
@@ -320,9 +541,9 @@ function abidjanDate(date = new Date()) {
 }
 
 function dateOffset(offset) {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + offset);
-  return abidjanDate(d);
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + offset);
+  return abidjanDate(date);
 }
 
 /* MATCHS EN DIRECT */
@@ -330,9 +551,9 @@ function dateOffset(offset) {
 async function liveMatches() {
   const data = await apiFootball('/fixtures?live=all');
 
-  return data.filter(m =>
+  return data.filter(match =>
     ['1H', '2H', 'HT', 'ET', 'BT', 'P', 'LIVE'].includes(
-      m.fixture?.status?.short
+      match.fixture?.status?.short
     )
   );
 }
@@ -342,15 +563,15 @@ function liveText(matches) {
     return '🔴 Aucun match en direct actuellement.';
   }
 
-  return matches.slice(0, 30).map(m => {
-    const home = m.teams?.home?.name || 'Équipe domicile';
-    const away = m.teams?.away?.name || 'Équipe extérieure';
+  return matches.slice(0, 30).map(match => {
+    const home = match.teams?.home?.name || 'Équipe domicile';
+    const away = match.teams?.away?.name || 'Équipe extérieure';
 
-    const homeGoals = m.goals?.home ?? 0;
-    const awayGoals = m.goals?.away ?? 0;
+    const homeGoals = match.goals?.home ?? 0;
+    const awayGoals = match.goals?.away ?? 0;
 
-    const elapsed = m.fixture?.status?.elapsed;
-    const status = m.fixture?.status?.short;
+    const elapsed = match.fixture?.status?.elapsed;
+    const status = match.fixture?.status?.short;
 
     const minute = elapsed != null
       ? `${elapsed}'`
@@ -363,10 +584,12 @@ ${home} ${homeGoals} - ${awayGoals} ${away}`;
   }).join('\n\n');
 }
 
-/* MATCHS ET COTES */
+/* =====================================================
+   MATCHS ET COTES
+===================================================== */
 
-function oddsFormat(n) {
-  return Number(n).toFixed(2);
+function oddsFormat(number) {
+  return Number(number).toFixed(2);
 }
 
 async function getFixturesForDate(date) {
@@ -385,7 +608,9 @@ async function getOddsForFixture(fixtureId) {
           const choice = normalize(value.value);
           const odd = Number(value.odd);
 
-          if (!Number.isFinite(odd) || odd < 1.2 || odd > 1.8) continue;
+          if (!Number.isFinite(odd) || odd < 1.2 || odd > 1.8) {
+            continue;
+          }
 
           if (
             (market.includes('goals over under') ||
@@ -435,33 +660,36 @@ async function couponSearch() {
 
     try {
       fixtures = await getFixturesForDate(date);
-    } catch (e) {
-      console.warn(`Fixtures ${date}:`, e.message);
+    } catch (error) {
+      console.warn(`Fixtures ${date}:`, error.message);
       continue;
     }
 
-    for (const f of fixtures) {
+    for (const fixture of fixtures) {
       if (picks.length >= 6) break;
-      if (f.fixture?.status?.short !== 'NS') continue;
-      if (seen.has(f.fixture.id)) continue;
+      if (fixture.fixture?.status?.short !== 'NS') continue;
+      if (seen.has(fixture.fixture.id)) continue;
 
-      seen.add(f.fixture.id);
+      seen.add(fixture.fixture.id);
 
       try {
-        const odds = await getOddsForFixture(f.fixture.id);
+        const odds = await getOddsForFixture(fixture.fixture.id);
         const pick = odds[0];
 
         if (pick) {
           picks.push({
-            home: f.teams.home.name,
-            away: f.teams.away.name,
-            date: f.fixture.date,
+            home: fixture.teams.home.name,
+            away: fixture.teams.away.name,
+            date: fixture.fixture.date,
             ...pick
           });
         }
 
-      } catch (e) {
-        console.warn(`Cotes fixture ${f.fixture.id}:`, e.message);
+      } catch (error) {
+        console.warn(
+          `Cotes fixture ${fixture.fixture.id}:`,
+          error.message
+        );
       }
     }
   }
@@ -472,17 +700,19 @@ async function couponSearch() {
 
   return `🎯 SÉLECTION DE MARCHÉS — COTES RÉELLES TROUVÉES
 
-${picks.map((p, i) =>
-    `${i + 1}. ${p.home} – ${p.away}
-Marché : ${p.market} / ${p.value}
-Cote : ${oddsFormat(p.odd)}
-Bookmaker : ${p.bookmaker}
+${picks.map((pick, index) =>
+    `${index + 1}. ${pick.home} – ${pick.away}
+Marché : ${pick.market} / ${pick.value}
+Cote : ${oddsFormat(pick.odd)}
+Bookmaker : ${pick.bookmaker}
 `).join('\n')}
 
 ⚠️ Les cotes peuvent changer. Cette sélection n'est pas une garantie.`;
 }
 
-/* AIDE */
+/* =====================================================
+   AIDE
+===================================================== */
 
 function helpText() {
   return `🤖 SPORT ANALYZER AI
@@ -492,7 +722,7 @@ function helpText() {
 /live — matchs en direct
 /coupon — recherche de marchés et cotes réelles
 /cotes — mêmes données de cotes disponibles
-/fifa — football virtuel
+/fifa — diagnostic football virtuel 1xBet
 /help — aide
 
 Exemples :
@@ -503,7 +733,10 @@ Les statistiques dépendent des données disponibles.`;
 }
 
 function parseTwoTeams(text) {
-  const cleaned = text.replace(/^\/(foot|compare)\s*/i, '').trim();
+  const cleaned = text
+    .replace(/^\/(foot|compare)\s*/i, '')
+    .trim();
+
   const parts = cleaned.split(/\s+(?:vs\.?|contre)\s+/i);
 
   return parts.length >= 2
@@ -511,10 +744,14 @@ function parseTwoTeams(text) {
     : null;
 }
 
-/* COMMANDES TELEGRAM */
+/* =====================================================
+   COMMANDES TELEGRAM
+===================================================== */
 
 bot.start(ctx =>
-  ctx.reply('👋 Bienvenue sur SPORT ANALYZER AI.\n\nUtilise /help pour voir les commandes.')
+  ctx.reply(
+    '👋 Bienvenue sur SPORT ANALYZER AI.\n\nUtilise /help pour voir les commandes.'
+  )
 );
 
 bot.help(ctx => ctx.reply(helpText()));
@@ -525,15 +762,19 @@ bot.command('forme', async ctx => {
     .replace(/^\/forme(?:@\w+)?\s*/i, '')
     .trim();
 
-  if (!name) return ctx.reply('Utilise : /forme Real Madrid');
+  if (!name) {
+    return ctx.reply('Utilise : /forme Real Madrid');
+  }
 
-  await ctx.reply('🔎 Analyse des statistiques et préparation de l’analyse IA…');
+  await ctx.reply(
+    '🔎 Analyse des statistiques et préparation de l’analyse IA…'
+  );
 
   try {
     await ctx.reply(await teamReport(name));
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`Erreur pendant l'analyse : ${e.message}`);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur pendant l'analyse : ${error.message}`);
   }
 });
 
@@ -542,15 +783,17 @@ bot.command('foot', async ctx => {
     ctx.message.text.replace(/^\/foot(?:@\w+)?/i, '/foot')
   );
 
-  if (!names) return ctx.reply('Utilise : /foot Arsenal vs Chelsea');
+  if (!names) {
+    return ctx.reply('Utilise : /foot Arsenal vs Chelsea');
+  }
 
   await ctx.reply('⚔️ Comparaison des équipes en cours…');
 
   try {
     await ctx.reply(await compareTeams(names));
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`Erreur de comparaison : ${e.message}`);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur de comparaison : ${error.message}`);
   }
 });
 
@@ -559,20 +802,22 @@ bot.command('live', async ctx => {
 
   try {
     await ctx.reply(liveText(await liveMatches()));
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`Live indisponible : ${e.message}`);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Live indisponible : ${error.message}`);
   }
 });
 
 bot.command('coupon', async ctx => {
-  await ctx.reply('🔎 Recherche des matchs et des cotes réelles. Cela peut prendre un moment…');
+  await ctx.reply(
+    '🔎 Recherche des matchs et des cotes réelles. Cela peut prendre un moment…'
+  );
 
   try {
     await ctx.reply(await couponSearch());
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`Recherche indisponible : ${e.message}`);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Recherche indisponible : ${error.message}`);
   }
 });
 
@@ -581,14 +826,13 @@ bot.command('cotes', async ctx => {
 
   try {
     await ctx.reply(await couponSearch());
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`Cotes indisponibles : ${e.message}`);
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Cotes indisponibles : ${error.message}`);
   }
 });
 
 bot.command('fifa', async ctx => {
-  // Le moteur est chargé, mais aucune source virtuelle vérifiée n'est connectée.
   const statusCheck = fifaEngine.classifyStatus('NS');
 
   const sample = fifaEngine.normalizeMatch({
@@ -598,37 +842,61 @@ bot.command('fifa', async ctx => {
   });
 
   if (!sample || statusCheck !== 'PREMATCH') {
-    return ctx.reply('⚠️ Le moteur FIFA n’a pas pu être initialisé.');
+    return ctx.reply(
+      '⚠️ Le moteur FIFA n’a pas pu être initialisé.'
+    );
   }
 
-  return ctx.reply(
-    '🎮 SPORT ANALYZER AI — FIFA / eFOOTBALL\n\n' +
-    '✅ Moteur d’analyse chargé.\n' +
-    '✅ Normalisation des matchs et vérification des cotes activées.\n' +
-    '⚠️ Connexion automatique à 1xBet : non disponible pour le moment.\n\n' +
-    'Pour produire une analyse fiable, il faut recevoir le match et au moins 5 résultats terminés par équipe depuis une source vérifiée.\n' +
-    'Sans ces données, le bot ne donnera ni pronostic, ni score, ni cote inventés.\n\n' +
-    'Formats et compétitions : le module pourra traiter les formats fournis par la source (FC25, FC26, Rush, 3x3, 4x4, penalties, etc.).\n' +
-    'État : moteur prêt, source de données à connecter.'
+  await ctx.reply(
+    '🎮 Diagnostic PulseScore en cours…\n' +
+    'Vérification des matchs, résultats et événements e-sport.'
   );
+
+  try {
+    const report = await pulseDiagnostic();
+
+    await ctx.reply(report, {
+      disable_web_page_preview: true
+    });
+
+  } catch (error) {
+    console.error('Erreur diagnostic FIFA:', error);
+
+    await ctx.reply(
+      `⚠️ Diagnostic FIFA impossible : ${error.message}`
+    );
+  }
 });
+
+/* =====================================================
+   MESSAGES ET ERREURS
+===================================================== */
 
 bot.on('text', ctx =>
-  ctx.reply('Commande non reconnue. Utilise /help pour voir les commandes.')
+  ctx.reply(
+    'Commande non reconnue. Utilise /help pour voir les commandes.'
+  )
 );
 
-bot.catch((err, ctx) => {
-  console.error('Erreur bot:', err);
+bot.catch((error, ctx) => {
+  console.error('Erreur bot:', error);
 
   if (ctx) {
-    ctx.reply('Une erreur est survenue. Réessaie plus tard.').catch(() => {});
+    ctx.reply(
+      'Une erreur est survenue. Réessaie plus tard.'
+    ).catch(() => {});
   }
 });
+
+/* =====================================================
+   DÉMARRAGE
+===================================================== */
 
 bot.launch()
   .then(() => console.log('SPORT ANALYZER AI bot lancé'))
-  .catch(e => console.error('Échec lancement bot:', e));
+  .catch(error =>
+    console.error('Échec lancement bot:', error)
+  );
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-    
