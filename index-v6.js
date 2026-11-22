@@ -320,6 +320,36 @@ function dateOffset(offset) {
 }
 
 async function liveMatches() {
+  const data = await apiFootball('/fixtures?live=all');
+
+  return data.filter(m =>
+    ['1H', '2H', 'HT', 'ET', 'BT', 'P', 'LIVE'].includes(
+      m.fixture?.status?.short
+    )
+  );
+}
+
+function liveText(matches) {
+  if (!matches || !matches.length) {
+    return '🔴 Aucun match en direct actuellement.';
+  }
+
+  return matches.slice(0, 30).map(m => {
+    const home = m.teams?.home?.name || 'Équipe domicile';
+    const away = m.teams?.away?.name || 'Équipe extérieure';
+
+    const homeGoals = m.goals?.home ?? 0;
+    const awayGoals = m.goals?.away ?? 0;
+
+    const elapsed = m.fixture?.status?.elapsed;
+    const status = m.fixture?.status?.short;
+    const minute = elapsed != null ? `${elapsed}'` :
+      status === 'HT' ? 'Mi-temps' : status;
+
+    return `🔴 ${minute}
+${home} ${homeGoals} - ${awayGoals} ${away}`;
+  }).join('\n\n');
+}
   const data = await footballData('/matches');
 
   return (data.matches || []).filter(m =>
