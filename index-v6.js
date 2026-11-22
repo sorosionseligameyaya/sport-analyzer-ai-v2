@@ -1,4 +1,6 @@
 
+'use strict';
+
 const express = require('express');
 const { Telegraf } = require('telegraf');
 
@@ -9,8 +11,12 @@ const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY;
 const API_BASE = 'https://api.football-data.org/v4';
 const API_FOOTBALL_BASE = 'https://v3.football.api-sports.io';
 
-if (!BOT_TOKEN || !FOOTBALL_DATA_TOKEN) {
-  throw new Error('BOT_TOKEN ou FOOTBALL_DATA_TOKEN manquant.');
+if (!BOT_TOKEN) {
+  throw new Error('BOT_TOKEN manquant dans les variables Render.');
+}
+
+if (typeof fetch !== 'function') {
+  throw new Error('Node.js 18 ou supérieur est nécessaire.');
 }
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -19,88 +25,32 @@ const app = express();
 app.use(express.json());
 
 app.get('/', (_req, res) => {
-  res.status(200).send('Sport Analyzer AI V6 fonctionne.');
+  res.status(200).send('SPORT ANALYZER AI fonctionne.');
 });
 
-// =====================================
-// API FOOTBALL-DATA
-// =====================================
+// ======================================
+// OUTILS COMMUNS
+// ======================================
 
-
-async function apiGet(path) {
-  const response = await fetch(API_BASE + path, {
-    headers: {
-      'X-Auth-Token': FOOTBALL_DATA_TOKEN
-    }
-  });
-
-  const details = await response.text();
-
-  if (!response.ok) {
-    console.error(
-      'ERREUR FOOTBALL-DATA :',
-      response.status,
-      details
-    );
-
-    throw new Error(
-      `Erreur API football (${response.status}) : ${details.slice(0, 300)}`
-    );
-  }
-
-  return JSON.parse(details);
+function normalize(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-  const response = await fetch(API_BASE + path, {
-    headers: { 'X-Auth-Token': FOOTBALL_DATA_TOKEN }
-  });
+async function sendLongMessage(ctx, message) {
+  const maxLength = 3900;
 
-  if (!response.ok) {
-    if (response.status === 429) {
-      throw new Error('Limite API atteinte. Réessaie plus tard.');
-    }
-    if (response.status === 403) {
-      throw new Error('Accès API refusé ou compétition non autorisée.');
-    }
-    if (response.status === 404) {
-      throw new Error('Données introuvables.');
-    }
-    throw new Error(`Erreur API football (${response.status}).`);
+  for (let i = 0; i < message.length; i += maxLength) {
+    await ctx.reply(message.slice(i, i + maxLength));
   }
-
-  return response.json();
 }
 
-// =====================================
-// API-FOOTBALL : MATCHS ET COTES
-// =====================================
-
-async function apiFootballGet(path, params = {}) {
-  if (!API_FOOTBALL_KEY) {
-    throw new Error('API_FOOTBALL_KEY absente dans Render.');
-  }
-
-  const query = new URLSearchParams(params).toString();
-  const url = `${API_FOOTBALL_BASE}${path}?${query}`;
-
-  const response = await fetch(url, {
-    headers: { 'x-apisports-key': API_FOOTBALL_KEY }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Erreur API-Football (${response.status}).`);
-  }
-
-  const data = await response.json();
-
-  if (data.errors && Object.keys(data.errors).length) {
-    throw new Error(JSON.stringify(data.errors));
-  }
-
-  return data.response || [];
-}
-
-function abidjanDate(date) {
+function getAbidjanDate(date) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Abidjan',
     year: 'numeric',
@@ -116,25 +66,491 @@ function abidjanDate(date) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function normalizeText(value) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
+// ======================================
+// API FOOTBALL-DATA
+// ======================================
+
+async function apiGet(path) {
+  if (!FOOTBALL_DATA_TOKEN) {
+    throw new Error(
+      'FOOTBALL_DATA_TOKEN absent dans les variables Render.'
+    );
+  }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: {
+      'X-Auth-Token': FOOTBALL_DATA_TOKEN
+    }
+  });
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    console.error(
+      'ERREUR FOOTBALL-DATA:',
+      response.status,
+      body
+    );
+
+    throw new Error(
+      `Football-data (${response.status}) : ${body.slice(0, 200)}`
+    );
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error('Réponse invalide reçue de Football-data.');
+  }
 }
 
-function findAvailableSelection(oddsData) {
+// ======================================
+// RECHERCHE DES ÉQUIPES
+// ======================================
+
+let teamsCache = [];
+let teamsCacheTime = 0;
+
+const COMPETITIONS = [
+  'PL',
+  'PD',
+  'BL1',
+  'SA',
+  'FL1',
+  'CL',
+  'ELC',
+  'PPL',
+  'DED'
+];
+
+async function getTeams() {
+  const cacheValid =
+    teamsCache.length > 0 &&
+    Date.now() - teamsCacheTime < 30 * 60 * 1000;
+
+  if (cacheValid) {
+    return teamsCache;
+  }
+
+  const foundTeams = new Map();
+  const errors = [];
+
+  for (const code of COMPETITIONS) {
+    try {
+      const data = await apiGet(
+        `/competitions/${code}/teams`
+      );
+
+      for (const team of data.teams || []) {
+        if (team.id) {
+          foundTeams.set(team.id, team);
+        }
+      }
+    } catch (error) {
+      errors.push(`${code}: ${error.message}`);
+      console.log(`Compétition ${code} indisponible.`);
+    }
+  }
+
+  teamsCache = Array.from(foundTeams.values());
+  teamsCacheTime = Date.now();
+
+  if (!teamsCache.length) {
+    throw new Error(
+      'Aucune équipe récupérée. Vérifie ton accès Football-data et les compétitions autorisées.'
+    );
+  }
+
+  return teamsCache;
+}
+
+const aliases = {
+  'real madrid': ['real madrid cf'],
+  'barcelona': ['fc barcelona', 'barca'],
+  'atletico madrid': ['atletico de madrid'],
+  'manchester united': ['man utd', 'man united'],
+  'manchester city': ['man city'],
+  'paris saint germain': ['psg', 'paris sg'],
+  'bayern munich': ['fc bayern munchen'],
+  'inter milan': ['inter'],
+  'ac milan': ['milan'],
+  'borussia dortmund': ['dortmund', 'bvb'],
+  'tottenham': ['tottenham hotspur'],
+  'arsenal': ['arsenal fc'],
+  'chelsea': ['chelsea fc'],
+  'liverpool': ['liverpool fc']
+};
+
+function findTeamByName(name, teams) {
+  const target = normalize(name);
+
+  if (!target) return null;
+
+  let found = teams.find(team =>
+    normalize(team.name) === target ||
+    normalize(team.shortName) === target ||
+    normalize(team.tla) === target
+  );
+
+  if (found) return found;
+
+  for (const [mainName, variations] of Object.entries(aliases)) {
+    const names = [mainName, ...variations].map(normalize);
+
+    if (names.includes(target)) {
+      found = teams.find(team =>
+        names.includes(normalize(team.name)) ||
+        names.includes(normalize(team.shortName))
+      );
+
+      if (found) return found;
+    }
+  }
+
+  return teams.find(team => {
+    const teamName = normalize(team.name);
+    return teamName.includes(target) ||
+      target.includes(teamName);
+  }) || null;
+}
+
+// ======================================
+// DERNIERS MATCHS
+// ======================================
+
+async function getLastMatches(teamId) {
+  const data = await apiGet(
+    `/teams/${teamId}/matches?status=FINISHED&limit=20`
+  );
+
+  return (data.matches || [])
+    .filter(match =>
+      match.status === 'FINISHED' &&
+      Number.isFinite(match.score?.fullTime?.home) &&
+      Number.isFinite(match.score?.fullTime?.away)
+    )
+    .sort((a, b) =>
+      new Date(b.utcDate) - new Date(a.utcDate)
+    )
+    .slice(0, 5);
+}
+
+function matchResultForTeam(match, teamId) {
+  const isHome = match.homeTeam.id === teamId;
+
+  const goalsFor = isHome
+    ? match.score.fullTime.home
+    : match.score.fullTime.away;
+
+  const goalsAgainst = isHome
+    ? match.score.fullTime.away
+    : match.score.fullTime.home;
+
+  let result = 'N';
+  let points = 1;
+
+  if (goalsFor > goalsAgainst) {
+    result = 'V';
+    points = 3;
+  } else if (goalsFor < goalsAgainst) {
+    result = 'D';
+    points = 0;
+  }
+
+  return {
+    result,
+    points,
+    goalsFor,
+    goalsAgainst
+  };
+}
+
+function calculateStats(matches, teamId) {
+  const rows = matches.map(match =>
+    matchResultForTeam(match, teamId)
+  );
+
+  const count = rows.length;
+
+  const wins = rows.filter(r => r.result === 'V').length;
+  const draws = rows.filter(r => r.result === 'N').length;
+  const losses = rows.filter(r => r.result === 'D').length;
+
+  const goalsFor = rows.reduce(
+    (sum, r) => sum + r.goalsFor, 0
+  );
+
+  const goalsAgainst = rows.reduce(
+    (sum, r) => sum + r.goalsAgainst, 0
+  );
+
+  const points = rows.reduce(
+    (sum, r) => sum + r.points, 0
+  );
+
+  const avgGoalsFor = count ? goalsFor / count : 0;
+  const avgGoalsAgainst = count ? goalsAgainst / count : 0;
+
+  const scoringRate = count
+    ? rows.filter(r => r.goalsFor > 0).length / count * 100
+    : 0;
+
+  const cleanSheets = rows.filter(
+    r => r.goalsAgainst === 0
+  ).length;
+
+  const attackScore = Math.min(
+    100,
+    avgGoalsFor / 3 * 70 + scoringRate * 0.30
+  );
+
+  const defenseScore = Math.max(
+    0,
+    Math.min(100, 100 - avgGoalsAgainst * 25)
+  );
+
+  const formScore = count ? points / (count * 3) * 100 : 0;
+
+  const performanceScore = Math.round(
+    formScore * 0.40 +
+    attackScore * 0.30 +
+    defenseScore * 0.30
+  );
+
+  return {
+    rows,
+    count,
+    wins,
+    draws,
+    losses,
+    goalsFor,
+    goalsAgainst,
+    avgGoalsFor,
+    avgGoalsAgainst,
+    scoringRate,
+    cleanSheets,
+    attackScore,
+    defenseScore,
+    formScore,
+    performanceScore
+  };
+}
+
+function formatStats(name, stats) {
+  const form = stats.rows
+    .map(row => row.result)
+    .join(' - ');
+
+  return `
+⚽ ANALYSE DE ${name.toUpperCase()}
+
+📋 Matchs analysés : ${stats.count}
+
+🟢 Victoires : ${stats.wins}
+🟡 Nuls : ${stats.draws}
+🔴 Défaites : ${stats.losses}
+
+⚽ Buts marqués : ${stats.goalsFor}
+🥅 Buts encaissés : ${stats.goalsAgainst}
+
+📊 Moyenne de buts marqués : ${stats.avgGoalsFor.toFixed(2)}
+📊 Moyenne de buts encaissés : ${stats.avgGoalsAgainst.toFixed(2)}
+
+🎯 Matchs avec au moins un but marqué : ${stats.scoringRate.toFixed(0)}%
+🧤 Matchs sans encaisser : ${stats.cleanSheets}
+
+📈 Forme récente :
+${form || 'Indisponible'}
+
+⚔️ Attaque : ${stats.attackScore.toFixed(0)}/100
+🛡️ Défense : ${stats.defenseScore.toFixed(0)}/100
+⭐ Performance : ${stats.performanceScore}/100
+
+ℹ️ Ces indicateurs ne sont pas des probabilités de victoire.
+`;
+}
+
+// ======================================
+// COMMANDE FORME
+// ======================================
+
+async function analyzeTeam(name) {
+  const teams = await getTeams();
+  const team = findTeamByName(name, teams);
+
+  if (!team) {
+    return `Équipe introuvable : ${name}`;
+  }
+
+  const matches = await getLastMatches(team.id);
+  const stats = calculateStats(matches, team.id);
+
+  if (!stats.count) {
+    return `Pas assez de résultats disponibles pour ${team.name}.`;
+  }
+
+  return formatStats(team.name, stats);
+}
+
+// ======================================
+// COMPARAISON DES ÉQUIPES
+// ======================================
+
+async function compareTeams(nameA, nameB) {
+  const teams = await getTeams();
+
+  const teamA = findTeamByName(nameA, teams);
+  const teamB = findTeamByName(nameB, teams);
+
+  if (!teamA) return `Équipe introuvable : ${nameA}`;
+  if (!teamB) return `Équipe introuvable : ${nameB}`;
+
+  if (teamA.id === teamB.id) {
+    return 'Choisis deux équipes différentes.';
+  }
+
+  const [matchesA, matchesB] = await Promise.all([
+    getLastMatches(teamA.id),
+    getLastMatches(teamB.id)
+  ]);
+
+  const A = calculateStats(matchesA, teamA.id);
+  const B = calculateStats(matchesB, teamB.id);
+
+  if (!A.count || !B.count) {
+    return 'Données insuffisantes pour comparer ces équipes.';
+  }
+
+  let advantage = 'Équilibre statistique';
+
+  if (A.performanceScore > B.performanceScore) {
+    advantage = teamA.name;
+  } else if (B.performanceScore > A.performanceScore) {
+    advantage = teamB.name;
+  }
+
+  return `
+⚽ COMPARAISON DES ÉQUIPES
+
+📊 ${teamA.name}
+Matchs : ${A.count}
+Victoires : ${A.wins}
+Nuls : ${A.draws}
+Défaites : ${A.losses}
+Buts marqués : ${A.goalsFor}
+Buts encaissés : ${A.goalsAgainst}
+Moyenne buts marqués : ${A.avgGoalsFor.toFixed(2)}
+Performance : ${A.performanceScore}/100
+
+━━━━━━━━━━━━━━━━
+
+📊 ${teamB.name}
+Matchs : ${B.count}
+Victoires : ${B.wins}
+Nuls : ${B.draws}
+Défaites : ${B.losses}
+Buts marqués : ${B.goalsFor}
+Buts encaissés : ${B.goalsAgainst}
+Moyenne buts marqués : ${B.avgGoalsFor.toFixed(2)}
+Performance : ${B.performanceScore}/100
+
+🏆 Avantage statistique : ${advantage}
+
+ℹ️ Comparaison des cinq derniers matchs disponibles.
+`;
+}
+
+// ======================================
+// MATCHS EN DIRECT
+// ======================================
+
+async function getLiveMatches() {
+  const data = await apiGet('/matches?status=IN_PLAY');
+  return data.matches || [];
+}
+
+async function showLiveMatches(ctx) {
+  const matches = await getLiveMatches();
+
+  if (!matches.length) {
+    return ctx.reply('🔴 Aucun match en direct disponible.');
+  }
+
+  let message = '🔴 MATCHS EN DIRECT\n\n';
+
+  for (const match of matches) {
+    const home = match.homeTeam?.name || 'Équipe domicile';
+    const away = match.awayTeam?.name || 'Équipe extérieure';
+
+    const score = match.score?.fullTime;
+
+    const scoreText =
+      Number.isFinite(score?.home) &&
+      Number.isFinite(score?.away)
+        ? `${score.home} - ${score.away}`
+        : 'Score indisponible';
+
+    message += `⚽ ${home} - ${away}\n`;
+    message += `📊 Score : ${scoreText}\n`;
+    message += `⏱️ Statut : ${match.status}\n\n`;
+  }
+
+  return sendLongMessage(ctx, message);
+}
+
+// ======================================
+// API-FOOTBALL : MATCHS ET COTES
+// ======================================
+
+async function apiFootballGet(path, params = {}) {
+  if (!API_FOOTBALL_KEY) {
+    throw new Error('Clé API-Football absente dans Render.');
+  }
+
+  const query = new URLSearchParams(params).toString();
+  const url = `${API_FOOTBALL_BASE}${path}?${query}`;
+
+  const response = await fetch(url, {
+    headers: {
+      'x-apisports-key': API_FOOTBALL_KEY
+    }
+  });
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`API-Football (${response.status}) : ${body.slice(0, 200)}`);
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw new Error('Réponse API-Football invalide.');
+  }
+
+  if (data.errors && Object.keys(data.errors).length) {
+    throw new Error(JSON.stringify(data.errors));
+  }
+
+  return data.response || [];
+}
+
+// ======================================
+// ANALYSE DES COTES
+// ======================================
+
+function findSelection(oddsData) {
   const candidates = [];
 
   for (const bookmaker of oddsData[0]?.bookmakers || []) {
     for (const bet of bookmaker.bets || []) {
-      const market = normalizeText(bet.name);
+      const market = normalize(bet.name);
 
       for (const item of bet.values || []) {
         const odd = Number(item.odd);
-        const value = String(item.value || '');
-        const normalized = normalizeText(value);
+        const value = normalize(item.value);
 
         if (!Number.isFinite(odd) || odd < 1.20 || odd > 1.80) {
           continue;
@@ -143,43 +559,33 @@ function findAvailableSelection(oddsData) {
         let selection = null;
 
         if (
-          market.includes('over/under') ||
-          market.includes('total goals') ||
-          market.includes('goals over')
+          (market.includes('over under') ||
+           market.includes('total goals')) &&
+          (value.includes('over 1.5') || value.includes('over 1 5'))
         ) {
-          if (
-            normalized.includes('over 1.5') ||
-            normalized.includes('over 1,5')
-          ) {
-            selection = 'Plus de 1,5 buts';
-          }
+          selection = 'Plus de 1,5 buts';
         }
 
         if (
-          market.includes('both teams to score') ||
-          market.includes('both teams score') ||
-          market === 'btts'
+          (market.includes('both teams to score') ||
+           market === 'btts') &&
+          value === 'yes'
         ) {
-          if (normalized === 'yes') {
-            selection = 'Les deux équipes marquent : Oui';
-          }
+          selection = 'Les deux équipes marquent : Oui';
         }
 
         if (
-          market.includes('match winner') ||
-          market === '1x2'
+          market.includes('match winner') &&
+          ['home', 'draw', 'away'].includes(value)
         ) {
-          if (['home', 'draw', 'away', '1', 'x', '2'].includes(normalized)) {
-            selection = `Résultat : ${value}`;
-          }
+          selection = `Résultat : ${item.value}`;
         }
 
         if (selection) {
           candidates.push({
             selection,
             odd,
-            bookmaker: bookmaker.name || 'Non précisé',
-            market: bet.name || 'Non précisé'
+            bookmaker: bookmaker.name || 'Non précisé'
           });
         }
       }
@@ -190,17 +596,18 @@ function findAvailableSelection(oddsData) {
   return candidates[0] || null;
 }
 
-// =====================================
+// ======================================
 // GÉNÉRATION DU COUPON
-// =====================================
+// ======================================
 
 async function buildCoupon() {
   if (!API_FOOTBALL_KEY) {
-    return '❌ Clé API-Football absente. Vérifie API_FOOTBALL_KEY dans Render.';
+    return '❌ La clé API-Football est absente.';
   }
 
-  const today = abidjanDate(new Date());
-  const tomorrow = abidjanDate(
+  const today = getAbidjanDate(new Date());
+
+  const tomorrow = getAbidjanDate(
     new Date(Date.now() + 24 * 60 * 60 * 1000)
   );
 
@@ -225,18 +632,18 @@ async function buildCoupon() {
     .slice(0, 8);
 
   if (!upcoming.length) {
-    return 'ℹ️ Aucun match à venir trouvé pour aujourd’hui et demain.';
+    return 'ℹ️ Aucun match à venir trouvé aujourd’hui ou demain.';
   }
 
   const selections = [];
 
   for (const match of upcoming) {
     try {
-      const oddsData = await apiFootballGet('/odds', {
+      const odds = await apiFootballGet('/odds', {
         fixture: String(match.fixture.id)
       });
 
-      const pick = findAvailableSelection(oddsData);
+      const pick = findSelection(odds);
 
       if (pick) {
         selections.push({
@@ -252,12 +659,13 @@ async function buildCoupon() {
   }
 
   if (selections.length < 2) {
-    return `⚠️ Pas assez de cotes disponibles pour créer un coupon fiable.
+    return `⚠️ Pas assez de cotes disponibles.
 
 Matchs examinés : ${upcoming.length}
-Sélections avec cotes : ${selections.length}
+Sélections trouvées : ${selections.length}
 
-Aucune cote n'a été inventée. Réessaie plus tard.`;
+Aucune cote n'a été inventée.
+Vérifie l'accès à ton compte API-Football.`;
   }
 
   const chosen = selections
@@ -269,10 +677,10 @@ Aucune cote n'a été inventée. Réessaie plus tard.`;
     1
   );
 
-  let message = '🎟️ SPORT ANALYZER AI — COUPON V6\n\n';
+  let message = '🎟️ SPORT ANALYZER AI — COUPON\n\n';
 
   chosen.forEach((item, index) => {
-    const matchDate = new Date(item.date).toLocaleString('fr-FR', {
+    const date = new Date(item.date).toLocaleString('fr-FR', {
       timeZone: 'Africa/Abidjan',
       dateStyle: 'short',
       timeStyle: 'short'
@@ -282,519 +690,25 @@ Aucune cote n'a été inventée. Réessaie plus tard.`;
     message += `🎯 ${item.selection}\n`;
     message += `📈 Cote : ${item.odd.toFixed(2)}\n`;
     message += `🏦 Source : ${item.bookmaker}\n`;
-    message += `🕒 ${matchDate}\n\n`;
+    message += `🕒 ${date}\n\n`;
   });
 
   message += '━━━━━━━━━━━━━━━━\n';
   message += `🔢 Cote combinée indicative : ${combinedOdd.toFixed(2)}\n\n`;
-  message += '⚠️ Les cotes peuvent changer avant le coup d’envoi.\n';
-  message += '⚠️ Vérifie chaque sélection chez ton bookmaker.\n';
-  message += 'ℹ️ Une cote ne garantit jamais un résultat.';
+  message += '⚠️ Les cotes peuvent changer.\n';
+  message += '⚠️ Vérifie les sélections avant toute utilisation.\n';
+  message += 'ℹ️ Aucun résultat n’est garanti.';
 
   return message;
 }
 
-// =====================================
-// CACHE DES ÉQUIPES
-// =====================================
-
-let teamsCache = [];
-let teamsCacheTime = 0;
-
-async function getTeams() {
-  if (
-    !teamsCache.length ||
-    Date.now() - teamsCacheTime > 10 * 60 * 1000
-  ) {
-    const data = await apiGet('/teams?limit=500');
-    teamsCache = data.teams || [];
-    teamsCacheTime = Date.now();
-  }
-
-  return teamsCache;
-}
-
-// =====================================
-// RECHERCHE DES ÉQUIPES
-// =====================================
-
-function normalizeName(name) {
-  return String(name || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const aliases = {
-  'real madrid': ['real madrid cf'],
-  'barcelona': ['fc barcelona', 'barca'],
-  'atletico madrid': ['atletico de madrid'],
-  'manchester united': ['man united', 'man utd'],
-  'manchester city': ['man city'],
-  'paris saint germain': ['psg', 'paris sg'],
-  'bayern munich': ['fc bayern munchen'],
-  'inter milan': ['inter'],
-  'ac milan': ['milan'],
-  'borussia dortmund': ['dortmund', 'bvb'],
-  'tottenham': ['tottenham hotspur'],
-  'arsenal': ['arsenal fc'],
-  'chelsea': ['chelsea fc'],
-  'liverpool': ['liverpool fc']
-};
-
-function findTeamByName(name, teams) {
-  const target = normalizeName(name);
-  if (!target) return null;
-
-  const candidates = teams.map(team => ({
-    team,
-    name: normalizeName(team.name),
-    shortName: normalizeName(team.shortName),
-    tla: normalizeName(team.tla)
-  }));
-
-  let found = candidates.find(item =>
-    item.name === target ||
-    item.shortName === target ||
-    item.tla === target
-  );
-
-  if (found) return found.team;
-
-  for (const [mainName, variations] of Object.entries(aliases)) {
-    const main = normalizeName(mainName);
-    const normalizedVariations = variations.map(normalizeName);
-
-    if (
-      target === main ||
-      normalizedVariations.includes(target)
-    ) {
-      found = candidates.find(item =>
-        item.name === main ||
-        item.shortName === main ||
-        normalizedVariations.includes(item.name) ||
-        normalizedVariations.includes(item.shortName)
-      );
-
-      if (found) return found.team;
-    }
-  }
-
-  found = candidates.find(item =>
-    item.name.includes(target) ||
-    target.includes(item.name)
-  );
-
-  return found ? found.team : null;
-}
-
-// =====================================
-// DERNIERS MATCHS
-// =====================================
-
-async function getLastMatches(teamId) {
-  const data = await apiGet(
-    `/teams/${teamId}/matches?status=FINISHED&limit=20`
-  );
-
-  return (data.matches || [])
-    .filter(match =>
-      match.status === 'FINISHED' &&
-      match.score?.fullTime &&
-      Number.isFinite(match.score.fullTime.home) &&
-      Number.isFinite(match.score.fullTime.away)
-    )
-    .sort((a, b) =>
-      new Date(b.utcDate) - new Date(a.utcDate)
-    )
-    .slice(0, 5);
-}
-
-// =====================================
-// RÉSULTAT D'UN MATCH
-// =====================================
-
-function matchResultForTeam(match, teamId) {
-  const home = match.homeTeam.id === teamId;
-
-  const goalsFor = home
-    ? match.score.fullTime.home
-    : match.score.fullTime.away;
-
-  const goalsAgainst = home
-    ? match.score.fullTime.away
-    : match.score.fullTime.home;
-
-  let points = 1;
-  let result = 'N';
-
-  if (goalsFor > goalsAgainst) {
-    points = 3;
-    result = 'V';
-  } else if (goalsFor < goalsAgainst) {
-    points = 0;
-    result = 'D';
-  }
-
-  return {
-    goalsFor,
-    goalsAgainst,
-    points,
-    result,
-    opponent: home ? match.awayTeam.name : match.homeTeam.name,
-    date: match.utcDate
-  };
-}
-
-// =====================================
-// RÉSUMÉ DES MATCHS
-// =====================================
-
-function summarizeMatches(matches, teamId) {
-  const rows = matches.map(match =>
-    matchResultForTeam(match, teamId)
-  );
-
-  const wins = rows.filter(row => row.result === 'V').length;
-  const draws = rows.filter(row => row.result === 'N').length;
-  const losses = rows.filter(row => row.result === 'D').length;
-
-  const goalsFor = rows.reduce(
-    (sum, row) => sum + row.goalsFor, 0
-  );
-
-  const goalsAgainst = rows.reduce(
-    (sum, row) => sum + row.goalsAgainst, 0
-  );
-
-  const points = rows.reduce(
-    (sum, row) => sum + row.points, 0
-  );
-
-  return {
-    rows,
-    count: rows.length,
-    wins,
-    draws,
-    losses,
-    goalsFor,
-    goalsAgainst,
-    points,
-    avgGoalsFor: rows.length ? goalsFor / rows.length : 0,
-    avgGoalsAgainst: rows.length ? goalsAgainst / rows.length : 0,
-    scoringRate: rows.length
-      ? rows.filter(row => row.goalsFor > 0).length / rows.length * 100
-      : 0,
-    cleanSheets: rows.filter(row => row.goalsAgainst === 0).length
-  };
-}
-
-// =====================================
-// ANALYSE AVANCÉE V5
-// =====================================
-
-function advancedAnalysis(stats) {
-  const n = stats.count;
-
-  if (!n) {
-    return {
-      ...stats,
-      weightedPoints: 0,
-      weightedGoals: 0,
-      weightedConceded: 0,
-      consistency: 0,
-      formScore: 0,
-      attackScore: 0,
-      defenseScore: 0,
-      performanceScore: 0,
-      reliability: 'Données insuffisantes'
-    };
-  }
-
-  const weights = [3, 2, 1, 1, 1].slice(0, n);
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
-
-  const weightedPoints = stats.rows.reduce(
-    (sum, row, index) =>
-      sum + row.points * weights[index],
-    0
-  ) / totalWeight;
-
-  const weightedGoals = stats.rows.reduce(
-    (sum, row, index) =>
-      sum + row.goalsFor * weights[index],
-    0
-  ) / totalWeight;
-
-  const weightedConceded = stats.rows.reduce(
-    (sum, row, index) =>
-      sum + row.goalsAgainst * weights[index],
-    0
-  ) / totalWeight;
-
-  const pointValues = stats.rows.map(row => row.points);
-  const averagePoints = pointValues.reduce((a, b) => a + b, 0) / n;
-
-  const variance = pointValues.reduce(
-    (sum, value) =>
-      sum + Math.pow(value - averagePoints, 2),
-    0
-  ) / n;
-
-  const standardDeviation = Math.sqrt(variance);
-
-  const consistency = Math.max(
-    0,
-    Math.min(100, 100 - (standardDeviation / 1.5) * 100)
-  );
-
-  const formScore = (weightedPoints / 3) * 100;
-
-  const attackScore = Math.min(
-    100,
-    (stats.avgGoalsFor / 3) * 70 +
-    (stats.scoringRate * 0.30)
-  );
-
-  const defenseScore = Math.max(
-    0,
-    Math.min(100, 100 - stats.avgGoalsAgainst * 25)
-  );
-
-  const performanceScore = Math.round(
-    formScore * 0.35 +
-    attackScore * 0.25 +
-    defenseScore * 0.25 +
-    consistency * 0.15
-  );
-
-  let reliability = 'Faible';
-
-  if (n >= 5) reliability = 'Bonne';
-  else if (n >= 3) reliability = 'Moyenne';
-
-  return {
-    ...stats,
-    weightedPoints,
-    weightedGoals,
-    weightedConceded,
-    consistency,
-    formScore,
-    attackScore,
-    defenseScore,
-    performanceScore,
-    reliability
-  };
-}
-
-// =====================================
-// FORMATAGE DE L'ANALYSE
-// =====================================
-
-function summaryText(teamName, stats) {
-  const form = stats.rows.map(row => row.result).join(' - ');
-
-  return `
-⚽ ANALYSE DE ${teamName.toUpperCase()}
-
-📋 MATCHS ANALYSÉS : ${stats.count}
-
-🟢 Victoires : ${stats.wins}
-🟡 Nuls : ${stats.draws}
-🔴 Défaites : ${stats.losses}
-
-⚽ Buts marqués : ${stats.goalsFor}
-🥅 Buts encaissés : ${stats.goalsAgainst}
-
-📊 Moyenne buts marqués : ${stats.avgGoalsFor.toFixed(2)}
-📊 Moyenne buts encaissés : ${stats.avgGoalsAgainst.toFixed(2)}
-🎯 Matchs avec au moins un but marqué : ${stats.scoringRate.toFixed(0)}%
-🧤 Matchs sans encaisser : ${stats.cleanSheets}
-
-📈 FORME RÉCENTE
-${form || 'Aucun résultat disponible'}
-
-🔥 INDICATEURS V5
-
-⭐ Performance : ${stats.performanceScore}/100
-⚔️ Attaque : ${stats.attackScore.toFixed(0)}/100
-🛡️ Défense : ${stats.defenseScore.toFixed(0)}/100
-📊 Stabilité des résultats : ${stats.consistency.toFixed(0)}/100
-
-🎯 Points pondérés par match : ${stats.weightedPoints.toFixed(2)}
-🔎 Fiabilité des données : ${stats.reliability}
-
-ℹ️ Ces scores sont des indicateurs statistiques, pas des probabilités.
-`;
-}
-
-// =====================================
-// ANALYSE D'UNE ÉQUIPE
-// =====================================
-
-async function analyzeTeam(teamName) {
-  const teams = await getTeams();
-  const team = findTeamByName(teamName, teams);
-
-  if (!team) {
-    return `❌ Équipe introuvable : ${teamName}`;
-  }
-
-  const matches = await getLastMatches(team.id);
-  const stats = advancedAnalysis(
-    summarizeMatches(matches, team.id)
-  );
-
-  if (!stats.count) {
-    return `Aucun match terminé trouvé pour ${team.name}.`;
-  }
-
-  return summaryText(team.name, stats);
-}
-
-// =====================================
-// COMPARAISON DE DEUX ÉQUIPES
-// =====================================
-
-async function compareTeams(teamAName, teamBName) {
-  const teams = await getTeams();
-
-  const teamA = findTeamByName(teamAName, teams);
-  const teamB = findTeamByName(teamBName, teams);
-
-  if (!teamA) return `❌ Équipe introuvable : ${teamAName}`;
-  if (!teamB) return `❌ Équipe introuvable : ${teamBName}`;
-
-  if (teamA.id === teamB.id) {
-    return '❌ Choisis deux équipes différentes.';
-  }
-
-  const [matchesA, matchesB] = await Promise.all([
-    getLastMatches(teamA.id),
-    getLastMatches(teamB.id)
-  ]);
-
-  const A = advancedAnalysis(
-    summarizeMatches(matchesA, teamA.id)
-  );
-
-  const B = advancedAnalysis(
-    summarizeMatches(matchesB, teamB.id)
-  );
-
-  if (!A.count || !B.count) {
-    return 'Données insuffisantes pour comparer ces équipes.';
-  }
-
-  let advantage = 'Équilibre statistique';
-
-  if (A.performanceScore > B.performanceScore) {
-    advantage = teamA.name;
-  } else if (B.performanceScore > A.performanceScore) {
-    advantage = teamB.name;
-  }
-
-  return `
-⚽ COMPARAISON DES ÉQUIPES
-
-📊 ${teamA.name}
-Matchs analysés : ${A.count}
-Victoires : ${A.wins}
-Nuls : ${A.draws}
-Défaites : ${A.losses}
-Buts marqués : ${A.goalsFor}
-Buts encaissés : ${A.goalsAgainst}
-Moyenne de buts marqués : ${A.avgGoalsFor.toFixed(2)}
-Attaque : ${A.attackScore.toFixed(0)}/100
-Défense : ${A.defenseScore.toFixed(0)}/100
-Stabilité : ${A.consistency.toFixed(0)}/100
-Performance : ${A.performanceScore}/100
-
-━━━━━━━━━━━━━━━━
-
-📊 ${teamB.name}
-Matchs analysés : ${B.count}
-Victoires : ${B.wins}
-Nuls : ${B.draws}
-Défaites : ${B.losses}
-Buts marqués : ${B.goalsFor}
-Buts encaissés : ${B.goalsAgainst}
-Moyenne de buts marqués : ${B.avgGoalsFor.toFixed(2)}
-Attaque : ${B.attackScore.toFixed(0)}/100
-Défense : ${B.defenseScore.toFixed(0)}/100
-Stabilité : ${B.consistency.toFixed(0)}/100
-Performance : ${B.performanceScore}/100
-
-━━━━━━━━━━━━━━━━
-
-🏆 AVANTAGE STATISTIQUE : ${advantage}
-
-ℹ️ Comparaison basée sur les cinq derniers matchs disponibles.
-`;
-}
-
-// =====================================
-// ENVOI DES LONGS MESSAGES
-// =====================================
-
-async function sendLongMessage(ctx, message) {
-  const maxLength = 3900;
-
-  for (let i = 0; i < message.length; i += maxLength) {
-    await ctx.reply(message.slice(i, i + maxLength));
-  }
-}
-
-// =====================================
-// MATCHS EN DIRECT
-// =====================================
-
-async function getLiveMatches() {
-  const data = await apiGet('/matches?status=IN_PLAY');
-  return data.matches || [];
-}
-
-async function sendLiveMatches(ctx) {
-  const matches = await getLiveMatches();
-
-  if (!matches.length) {
-    return ctx.reply('🔴 Aucun match en direct disponible actuellement.');
-  }
-
-  let message = '🔴 MATCHS EN DIRECT\n\n';
-
-  for (const match of matches) {
-    const home = match.homeTeam?.name || 'Équipe domicile';
-    const away = match.awayTeam?.name || 'Équipe extérieure';
-
-    const scoreData =
-      match.score?.fullTime ||
-      match.score?.regularTime;
-
-    const score =
-      Number.isFinite(scoreData?.home) &&
-      Number.isFinite(scoreData?.away)
-        ? `${scoreData.home} - ${scoreData.away}`
-        : 'Score indisponible';
-
-    message += `⚽ ${home} - ${away}\n`;
-    message += `📊 Score : ${score}\n`;
-    message += `⏱️ Statut : ${match.status}\n\n`;
-  }
-
-  await sendLongMessage(ctx, message);
-}
-
-// =====================================
+// ======================================
 // COMMANDES TELEGRAM
-// =====================================
+// ======================================
 
 bot.start(ctx => {
   return ctx.reply(`
-👋 Bienvenue sur SPORT ANALYZER AI V6 !
+👋 BIENVENUE SUR SPORT ANALYZER AI !
 
 ⚽ Ton assistant d'analyse du football.
 
@@ -813,58 +727,44 @@ Voir les matchs en direct.
 Générer un coupon avec les cotes disponibles.
 
 /cotes
-Consulter les sélections et cotes disponibles.
+Consulter les cotes.
 
 /fifa
-Informations sur les matchs virtuels.
+Informations sur le football virtuel.
 
 /help
 Afficher le guide.
-
-🚀 VERSION V6
-Analyse statistique et recherche de cotes.
 `);
 });
 
 bot.help(ctx => {
   return ctx.reply(`
-📚 GUIDE SPORT ANALYZER AI V6
+📚 GUIDE SPORT ANALYZER AI
 
-1. Analyse d'équipe :
 /forme Real Madrid
-
-2. Comparaison :
 /foot Real Madrid vs Barcelona
-
-3. Matchs en direct :
 /live
-
-4. Coupon :
 /coupon
-
-5. Cotes :
 /cotes
-
-6. Football virtuel :
 /fifa
 
-ℹ️ Les résultats dépendent des données fournies par les API.
+Les données dépendent des API connectées.
 `);
 });
 
 bot.command('forme', async ctx => {
-  const teamName = ctx.message.text
+  const name = ctx.message.text
     .replace(/^\/forme(@\w+)?/i, '')
     .trim();
 
-  if (!teamName) {
+  if (!name) {
     return ctx.reply('Utilisation : /forme Real Madrid');
   }
 
-  await ctx.reply('⏳ Analyse statistique de l’équipe...');
+  await ctx.reply('⏳ Analyse de l’équipe en cours...');
 
   try {
-    const result = await analyzeTeam(teamName);
+    const result = await analyzeTeam(name);
     await sendLongMessage(ctx, result);
   } catch (error) {
     console.error('Erreur forme :', error);
@@ -877,10 +777,6 @@ bot.command('foot', async ctx => {
     .replace(/^\/foot(@\w+)?/i, '')
     .trim();
 
-  if (!input) {
-    return ctx.reply('Utilisation : /foot Real Madrid vs Barcelona');
-  }
-
   const parts = input.split(/\s+(?:vs\.?|contre)\s+/i);
 
   if (
@@ -889,11 +785,11 @@ bot.command('foot', async ctx => {
     !parts[1].trim()
   ) {
     return ctx.reply(
-      '❌ Format incorrect.\nExemple : /foot Real Madrid vs Barcelona'
+      'Utilisation : /foot Real Madrid vs Barcelona'
     );
   }
 
-  await ctx.reply('⏳ Analyse statistique des deux équipes...');
+  await ctx.reply('⏳ Comparaison des équipes en cours...');
 
   try {
     const result = await compareTeams(
@@ -912,26 +808,22 @@ bot.command('live', async ctx => {
   await ctx.reply('🔴 Recherche des matchs en direct...');
 
   try {
-    await sendLiveMatches(ctx);
+    await showLiveMatches(ctx);
   } catch (error) {
     console.error('Erreur live :', error);
     await ctx.reply(`❌ ${error.message}`);
   }
 });
 
-// =====================================
-// COMMANDE COUPON
-// =====================================
-
 bot.command('coupon', async ctx => {
-  await ctx.reply('⏳ Recherche des matchs et des cotes disponibles...');
+  await ctx.reply('⏳ Recherche des matchs et des cotes...');
 
   try {
-    const message = await buildCoupon();
-    await sendLongMessage(ctx, message);
+    const result = await buildCoupon();
+    await sendLongMessage(ctx, result);
   } catch (error) {
     console.error('Erreur coupon :', error);
-    await ctx.reply(`❌ Impossible de générer le coupon : ${error.message}`);
+    await ctx.reply(`❌ ${error.message}`);
   }
 });
 
@@ -939,33 +831,29 @@ bot.command('cotes', async ctx => {
   await ctx.reply('⏳ Recherche des cotes disponibles...');
 
   try {
-    const message = await buildCoupon();
-    await sendLongMessage(ctx, message);
+    const result = await buildCoupon();
+    await sendLongMessage(ctx, result);
   } catch (error) {
     console.error('Erreur cotes :', error);
-    await ctx.reply(`❌ Erreur : ${error.message}`);
+    await ctx.reply(`❌ ${error.message}`);
   }
 });
-
-// =====================================
-// COMMANDE FIFA / VIRTUEL
-// =====================================
 
 bot.command('fifa', ctx => {
   return ctx.reply(`
 🎮 ANALYSE FIFA / E-FOOTBALL
 
-Cette fonction n'est pas encore connectée à une source de résultats virtuels.
+Cette fonction n'est pas encore connectée à une source de matchs virtuels.
 
-Je ne vais pas inventer des matchs, des scores ou des cotes.
+Je ne vais pas inventer de matchs, de résultats ou de cotes.
 
-Une API spécialisée dans les compétitions virtuelles sera nécessaire.
+Une API spécialisée sera nécessaire pour activer cette fonction.
 `);
 });
 
-// =====================================
-// GESTION DES ERREURS
-// =====================================
+// ======================================
+// ERREURS TELEGRAM
+// ======================================
 
 bot.catch((error, ctx) => {
   console.error('Erreur Telegram :', error);
@@ -975,9 +863,9 @@ bot.catch((error, ctx) => {
   ).catch(console.error);
 });
 
-// =====================================
-// DÉMARRAGE DU SERVEUR
-// =====================================
+// ======================================
+// DÉMARRAGE
+// ======================================
 
 const PORT = process.env.PORT || 3000;
 
@@ -987,7 +875,7 @@ app.listen(PORT, () => {
 
 bot.launch()
   .then(() => {
-    console.log('Sport Analyzer AI V6 démarré.');
+    console.log('SPORT ANALYZER AI démarré.');
   })
   .catch(error => {
     console.error('Erreur démarrage Telegram :', error);
