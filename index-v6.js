@@ -900,3 +900,100 @@ bot.launch()
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur pendant la comparaison : ${error.message}`);
+  }
+});
+
+bot.command('live', async ctx => {
+  await ctx.reply('🔴 Recherche des matchs en direct…');
+
+  try {
+    const matches = await liveMatches();
+    await ctx.reply(liveText(matches));
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur Live : ${error.message}`);
+  }
+});
+
+bot.command('coupon', async ctx => {
+  await ctx.reply('🎯 Recherche des matchs et vérification des cotes réelles…');
+
+  try {
+    await ctx.reply(await couponSearch());
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur coupon : ${error.message}`);
+  }
+});
+
+bot.command('cotes', async ctx => {
+  await ctx.reply('📊 Recherche des cotes disponibles…');
+
+  try {
+    await ctx.reply(await couponSearch());
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`Erreur cotes : ${error.message}`);
+  }
+});
+
+/* =====================================================
+   FIFA / eFOOTBALL — DIAGNOSTIC PULSESCORE
+===================================================== */
+
+bot.command('fifa', async ctx => {
+  await ctx.reply(
+    '🎮 Connexion à PulseScore en cours.\n' +
+    'Vérification des événements, résultats et données e-sport…'
+  );
+
+  try {
+    const report = await pulseDiagnostic();
+
+    await ctx.reply(report, {
+      disable_web_page_preview: true
+    });
+
+  } catch (error) {
+    console.error('Erreur FIFA :', error);
+
+    await ctx.reply(
+      `❌ Erreur du diagnostic FIFA : ${error.message}`
+    );
+  }
+});
+
+/* =====================================================
+   GESTION DES ERREURS ET DÉMARRAGE
+===================================================== */
+
+bot.catch((error, ctx) => {
+  console.error(
+    `Erreur Telegram (${ctx.updateType}) :`,
+    error
+  );
+});
+
+async function startBot() {
+  try {
+    await bot.launch();
+    console.log('SPORT ANALYZER AI démarré sur Telegram.');
+  } catch (error) {
+    console.error('Erreur démarrage Telegram :', error);
+    process.exit(1);
+  }
+}
+
+startBot();
+
+process.once('SIGINT', () => {
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  bot.stop('SIGTERM');
+});
