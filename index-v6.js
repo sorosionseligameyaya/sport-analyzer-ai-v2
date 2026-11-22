@@ -883,3 +883,48 @@ bot.launch()
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+async function askAI(prompt) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) return null;
+
+  try {
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+          messages: [
+            {
+              role: 'system',
+              content: 'Tu es un analyste football. Analyse uniquement les données reçues. N invente aucune statistique. Réponds en français et explique les tendances, les forces, les faiblesses et les risques.'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.3,
+          max_tokens: 500
+        })
+      }
+    );
+
+    if (!response.ok) {
+      console.error('Erreur OpenRouter:', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || null;
+
+  } catch (error) {
+    console.error('Erreur IA:', error.message);
+    return null;
+  }
+}
