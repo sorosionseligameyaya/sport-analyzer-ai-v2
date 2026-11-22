@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { Telegraf, session } = require('telegraf');
 
@@ -16,7 +17,7 @@ app.use(express.json());
 bot.use(session({ defaultSession: () => ({ mode: null }) }));
 
 app.get('/', (req, res) => {
-  res.status(200).send('⚽ Sport Analyzer AI V2 - Moteur d’analyse actif.');
+  res.status(200).send('⚽ Sport Analyzer AI V3 fonctionne.');
 });
 
 // =============================================
@@ -36,7 +37,7 @@ async function apiGet(path) {
     }
 
     if (response.status === 403) {
-      throw new Error('Accès API refusé. Vérifie les compétitions autorisées.');
+      throw new Error('Accès API refusé. Compétition non autorisée.');
     }
 
     if (response.status === 404) {
@@ -111,7 +112,7 @@ async function getTeamByName(name) {
   const teams = await getTeams();
   const wanted = normalizeName(name);
 
-  const possibleNames = [wanted];
+  const possibleNames = new Set([wanted]);
 
   for (const [key, values] of Object.entries(aliases)) {
     const normalizedKey = normalizeName(key);
@@ -121,36 +122,33 @@ async function getTeamByName(name) {
       normalizedKey === wanted ||
       normalizedValues.includes(wanted)
     ) {
-      possibleNames.push(normalizedKey, ...normalizedValues);
+      possibleNames.add(normalizedKey);
+
+      normalizedValues.forEach(value => {
+        possibleNames.add(value);
+      });
     }
   }
 
-  const matchesName = team => {
-    const names = [
-      normalizeName(team.name),
-      normalizeName(team.shortName),
-      normalizeName(team.tla)
-    ];
+  const teamNames = team => [
+    normalizeName(team.name),
+    normalizeName(team.shortName),
+    normalizeName(team.tla)
+  ];
 
-    return names.some(n => possibleNames.includes(n));
-  };
-
-  let team = teams.find(matchesName);
+  let team = teams.find(t =>
+    teamNames(t).some(n => possibleNames.has(n))
+  );
 
   if (!team) {
-    team = teams.find(t => {
-      const names = [
-        normalizeName(t.name),
-        normalizeName(t.shortName)
-      ];
-
-      return names.some(n =>
-          possibleNames.some(p =>
-            p.length >= 4 &&
-            (n.includes(p) || p.includes(n))
-          )
-        );
-    });
+    team = teams.find(t =>
+      teamNames(t).some(n =>
+        [...possibleNames].some(p =>
+          p.length >= 4 &&
+          (n.includes(p) || p.includes(n))
+        )
+      )
+    );
   }
 
   if (!team) {
@@ -174,10 +172,9 @@ async function getLastMatches(teamId, limit = 5) {
   return (data.matches || [])
     .filter(m =>
       m.status === 'FINISHED' &&
-      m.score?.fullTime?.home !== null &&
-      m.score?.fullTime?.away !== null &&
-      m.score?.fullTime?.home !== undefined &&
-      m.score?.fullTime?.away !== undefined
+      Number.isFinite(m.score?.fullTime?.home) &&
+      Number.isFinite(m.score?.fullTime?.away) &&
+      (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)
     )
     .sort((a, b) =>
       new Date(b.utcDate) - new Date(a.utcDate)
@@ -191,16 +188,20 @@ async function getLastMatches(teamId, limit = 5) {
 
 function matchResultForTeam(match, teamId) {
   const homeId = match.homeTeam?.id;
+  const awayId = match.awayTeam?.id;
 
   const homeGoals = match.score?.fullTime?.home;
   const awayGoals = match.score?.fullTime?.away;
 
   if (
-    homeGoals === null ||
-    awayGoals === null ||
-    homeGoals === undefined ||
-    awayGoals === undefined
+    !Number.isFinite(homeGoals) ||
+    !Number.isFinite(awayGoals)
   ) {
+    return null;
+  }
+
+  // Vérification que l'équipe fait bien partie du match
+  if (homeId !== teamId && awayId !== teamId) {
     return null;
   }
 
@@ -257,9 +258,6 @@ function summarizeMatches(team, matches) {
   const homeRows = rows.filter(r => r.home);
   const awayRows = rows.filter(r => !r.home);
 
-  const homeWins = homeRows.filter(r => r.result === 'V').length;
-  const awayWins = awayRows.filter(r => r.result === 'V').length;
-
   return {
     rows,
     wins,
@@ -271,19 +269,20 @@ function summarizeMatches(team, matches) {
     count: rows.length,
 
     homeCount: homeRows.length,
-    homeWins,
+    homeWins: homeRows.filter(r => r.result === 'V').length,
     homeGoalsFor: homeRows.reduce((t, r) => t + r.goalsFor, 0),
     homeGoalsAgainst: homeRows.reduce((t, r) => t + r.goalsAgainst, 0),
 
     awayCount: awayRows.length,
-    awayWins,
+    awayWins: awayRows.filter(r => r.result === 'V').length,
     awayGoalsFor: awayRows.reduce((t, r) => t + r.goalsFor, 0),
-    awayGoalsAgainst: awayRows.reduce((t, r) => t + r.goalsAgainst, 0)
+    awayGoalsAgainst: awayRows.reduce((t, r) => t + r.goalsAgainst, 0
+    )
   };
 }
 
 // =============================================
-// MOTEUR D'ANALYSE AVANCÉ
+// ANALYSE AVANCÉE
 // =============================================
 
 function advancedAnalysis(stats) {
@@ -306,12 +305,13 @@ function advancedAnalysis(stats) {
     r => r.goalsAgainst > 0
   ).length;
 
-  const scoringRate = (matchesScored / count) * 100;
-  const cleanSheetRate = (cleanSheets / count) * 100;
+  const scoringRate = matchesScored / count * 100;
+  const cleanSheetRate = cleanSheets / count * 100;
 
   const pointsPerMatch = stats.points / count;
-  const winRate = (stats.wins / count) * 100;
+  const winRate = stats.wins / count * 100;
 
+  // Niveau offensif
   let attackLevel;
 
   if (avgGoalsFor >= 2) {
@@ -324,6 +324,7 @@ function advancedAnalysis(stats) {
     attackLevel = '🔴 Faible';
   }
 
+  // Niveau défensif
   let defenseLevel;
 
   if (avgGoalsAgainst <= 0.6) {
@@ -336,6 +337,7 @@ function advancedAnalysis(stats) {
     defenseLevel = '🔴 Fragile';
   }
 
+  // Forme générale
   let formLevel;
 
   if (pointsPerMatch >= 2.4) {
@@ -347,6 +349,25 @@ function advancedAnalysis(stats) {
   } else {
     formLevel = '🔴 Dynamique difficile';
   }
+
+  // Analyse des 3 derniers matchs
+  const recentRows = stats.rows.slice(0, 3);
+
+  const recentPoints = recentRows.reduce(
+    (total, r) =>
+      total + (r.result === 'V' ? 3 : r.result === 'N' ? 1 : 0),
+    0
+  );
+
+  const recentGoals = recentRows.reduce(
+    (total, r) => total + r.goalsFor,
+    0
+  );
+
+  const recentConceded = recentRows.reduce(
+    (total, r) => total + r.goalsAgainst,
+    0
+  );
 
   return {
     avgGoalsFor,
@@ -360,7 +381,10 @@ function advancedAnalysis(stats) {
     winRate,
     attackLevel,
     defenseLevel,
-    formLevel
+    formLevel,
+    recentPoints,
+    recentGoals,
+    recentConceded
   };
 }
 
@@ -375,16 +399,20 @@ function formatNumber(value) {
   });
 }
 
+// =============================================
+// TEXTE DES STATISTIQUES
+// =============================================
+
 function summaryText(team, stats) {
   const advanced = advancedAnalysis(stats);
-
-  const form = stats.rows.length
-    ? stats.rows.map(r => r.result).join(' - ')
-    : 'Données indisponibles';
 
   if (!advanced) {
     return `📊 ${team.name}\n\nStatistiques indisponibles.`;
   }
+
+  const form = stats.rows.length
+    ? stats.rows.map(r => r.result).join(' - ')
+    : 'Indisponible';
 
   return (
     `📊 ${team.name}\n\n` +
@@ -393,7 +421,7 @@ function summaryText(team, stats) {
     `🟢 Victoires : ${stats.wins}\n` +
     `🟡 Nuls : ${stats.draws}\n` +
     `🔴 Défaites : ${stats.losses}\n` +
-    `🏆 Points : ${stats.points}/${stats.count * 3}\n` +
+    `🏆 Points : ${stats.points}\n` +
     `📈 Points par match : ${formatNumber(advanced.pointsPerMatch)}\n` +
     `📊 Taux de victoire : ${formatNumber(advanced.winRate)} %\n\n` +
 
@@ -411,9 +439,14 @@ function summaryText(team, stats) {
     `Taux de clean sheet : ${formatNumber(advanced.cleanSheetRate)} %\n` +
     `Niveau : ${advanced.defenseLevel}\n\n` +
 
-    `📈 FORME\n` +
+    `📈 FORME RÉCENTE\n` +
     `${form}\n` +
-    `${advanced.formLevel}`
+    `${advanced.formLevel}\n\n` +
+
+    `🔎 3 DERNIERS MATCHS\n` +
+    `Points : ${advanced.recentPoints}/9\n` +
+    `Buts marqués : ${advanced.recentGoals}\n` +
+    `Buts encaissés : ${advanced.recentConceded}`
   );
 }
 
@@ -431,29 +464,29 @@ function compareTeams(a, b) {
 
   const observations = [];
 
-  // Forme générale
+  // Forme
   if (A.pointsPerMatch > B.pointsPerMatch) {
     observations.push(
-      `📈 ${a.team.name} possède une meilleure dynamique de résultats.`
+      `📈 ${a.team.name} possède une meilleure dynamique.`
     );
   } else if (B.pointsPerMatch > A.pointsPerMatch) {
     observations.push(
-      `📈 ${b.team.name} possède une meilleure dynamique de résultats.`
+      `📈 ${b.team.name} possède une meilleure dynamique.`
     );
   } else {
     observations.push(
-      '📊 Les deux équipes ont une dynamique de résultats similaire.'
+      '📊 Les deux équipes ont une dynamique similaire.'
     );
   }
 
   // Attaque
   if (A.avgGoalsFor > B.avgGoalsFor) {
     observations.push(
-      `⚽ ${a.team.name} affiche une meilleure moyenne offensive.`
+      `⚽ ${a.team.name} possède la meilleure moyenne offensive.`
     );
   } else if (B.avgGoalsFor > A.avgGoalsFor) {
     observations.push(
-      `⚽ ${b.team.name} affiche une meilleure moyenne offensive.`
+      `⚽ ${b.team.name} possède la meilleure moyenne offensive.`
     );
   } else {
     observations.push(
@@ -464,57 +497,57 @@ function compareTeams(a, b) {
   // Défense
   if (A.avgGoalsAgainst < B.avgGoalsAgainst) {
     observations.push(
-      `🛡️ ${a.team.name} présente une meilleure solidité défensive.`
+      `🛡️ ${a.team.name} possède la défense la plus solide.`
     );
   } else if (B.avgGoalsAgainst < A.avgGoalsAgainst) {
     observations.push(
-      `🛡️ ${b.team.name} présente une meilleure solidité défensive.`
+      `🛡️ ${b.team.name} possède la défense la plus solide.`
     );
   } else {
     observations.push(
-      '🛡️ Les performances défensives sont similaires.'
+      '🛡️ Les deux défenses présentent des statistiques similaires.'
     );
   }
 
   // Régularité offensive
   if (A.scoringRate > B.scoringRate) {
     observations.push(
-      `🔥 ${a.team.name} a marqué plus régulièrement.`
+      `🔥 ${a.team.name} marque plus régulièrement.`
     );
   } else if (B.scoringRate > A.scoringRate) {
     observations.push(
-      `🔥 ${b.team.name} a marqué plus régulièrement.`
+      `🔥 ${b.team.name} marque plus régulièrement.`
     );
   }
 
-  // Conclusion basée sur les points par match
-  let conclusion;
-
+  // Comparaison globale
   const difference = Math.abs(
     A.pointsPerMatch - B.pointsPerMatch
   );
 
+  let conclusion;
+
   if (difference < 0.2) {
     conclusion =
-      '⚖️ Les statistiques sont très proches. ' +
-      'La comparaison ne permet pas de dégager une différence nette.';
+      '⚖️ Les statistiques sont proches. ' +
+      'Aucune différence nette ne se dégage.';
   } else if (A.pointsPerMatch > B.pointsPerMatch) {
     conclusion =
-      `📌 Sur la période étudiée, ${a.team.name} présente ` +
-      'les meilleurs résultats globaux.';
+      `📌 ${a.team.name} affiche les meilleurs résultats ` +
+      'sur la période étudiée.';
   } else {
     conclusion =
-      `📌 Sur la période étudiée, ${b.team.name} présente ` +
-      'les meilleurs résultats globaux.';
+      `📌 ${b.team.name} affiche les meilleurs résultats ` +
+      'sur la période étudiée.';
   }
 
   return (
     `🧠 ANALYSE AUTOMATIQUE\n\n` +
     observations.join('\n\n') +
     `\n\n${conclusion}\n\n` +
-    `ℹ️ Cette analyse repose uniquement sur les ${a.stats.count} ` +
-    `derniers matchs disponibles de chaque équipe. ` +
-    `Elle ne constitue pas une certitude sur un futur match.`
+    `ℹ️ Analyse statistique des ${a.stats.count} derniers ` +
+    `matchs de chaque équipe. Elle ne garantit pas ` +
+    `le résultat d'un futur match.`
   );
 }
 
@@ -595,8 +628,8 @@ bot.start(ctx => {
   ctx.session.mode = null;
 
   return ctx.reply(
-    '⚽ BIENVENUE SUR SPORT ANALYZER AI V2\n\n' +
-    '🤖 Ton assistant d’analyse football.\n\n' +
+    '⚽ BIENVENUE SUR SPORT ANALYZER AI V3\n\n' +
+    '🤖 Assistant d’analyse football.\n\n' +
     '📊 COMMANDES :\n\n' +
     '/foot - Comparaison de deux équipes\n' +
     '/forme - Analyse détaillée d’une équipe\n' +
@@ -613,15 +646,14 @@ bot.start(ctx => {
 
 bot.help(ctx => {
   return ctx.reply(
-    '⚽ SPORT ANALYZER AI V2\n\n' +
-    '📊 /foot Real Madrid vs Barcelona\n' +
-    'Comparaison statistique et conclusion automatique.\n\n' +
-    '📈 /forme Real Madrid\n' +
-    'Analyse détaillée de la forme récente.\n\n' +
-    '🔴 /live\n' +
-    'Consulter les matchs en direct.\n\n' +
-    'Tu peux également envoyer une commande sans argument ' +
-    'et répondre ensuite à la question du bot.'
+    '⚽ SPORT ANALYZER AI V3\n\n' +
+    '/foot Real Madrid vs Barcelona\n' +
+    'Comparaison complète.\n\n' +
+    '/forme Real Madrid\n' +
+    'Analyse détaillée.\n\n' +
+    '/live\n' +
+    'Matchs en direct.\n\n' +
+    'Envoie une commande sans argument pour être guidé.'
   );
 });
 
@@ -673,9 +705,7 @@ bot.command('forme', async ctx => {
   try {
     const result = await analyzeTeam(name);
 
-    return ctx.reply(
-      summaryText(result.team, result.stats)
-    );
+    return ctx.reply(summaryText(result.team, result.stats));
 
   } catch (err) {
     console.error('Erreur forme :', err.message);
@@ -705,17 +735,25 @@ bot.command('live', async ctx => {
     }
 
     const lines = matches.slice(0, 20).map(m => {
-      const home = m.score?.fullTime?.home;
-      const away = m.score?.fullTime?.away;
+      // Score actuel, avec fallback sur les champs disponibles
+      const home =
+        m.score?.fullTime?.home ??
+        m.score?.regularTime?.home ??
+        m.score?.halfTime?.home;
+
+      const away =
+        m.score?.fullTime?.away ??
+        m.score?.regularTime?.away ??
+        m.score?.halfTime?.away;
 
       const score =
-        home !== null && home !== undefined &&
-        away !== null && away !== undefined
+        Number.isFinite(home) && Number.isFinite(away)
           ? `${home} - ${away}`
           : 'Score non disponible';
 
       return (
-        `🔴 ${m.homeTeam.name} ${score} ${m.awayTeam.name}\n` +
+        `🔴 ${m.homeTeam?.name || 'Équipe domicile'} ` +
+        `${score} ${m.awayTeam?.name || 'Équipe extérieure'}\n` +
         `⏱ Statut : ${m.status || 'En cours'}`
       );
     });
@@ -755,12 +793,11 @@ bot.on('text', ctx => {
 
     return ctx.reply(
       `⏳ Recherche de ${message}…`
-    ).then(() => analyzeTeam(message))
-      .then(result => {
-        return ctx.reply(
-          summaryText(result.team, result.stats)
-        );
-      })
+    )
+      .then(() => analyzeTeam(message))
+      .then(result =>
+        ctx.reply(summaryText(result.team, result.stats))
+      )
       .catch(err => {
         console.error('Erreur analyse :', err.message);
 
@@ -793,11 +830,11 @@ bot.catch(err => {
 // =============================================
 
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Sport Analyzer AI V2 démarré.');
+  console.log('Sport Analyzer AI V3 démarré.');
 });
 
 // =============================================
-// LANCEMENT DU BOT
+// LANCEMENT
 // =============================================
 
 bot.launch();
