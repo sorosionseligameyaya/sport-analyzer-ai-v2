@@ -26,7 +26,31 @@ app.get('/', (_req, res) => {
 // API FOOTBALL-DATA
 // =====================================
 
+
 async function apiGet(path) {
+  const response = await fetch(API_BASE + path, {
+    headers: {
+      'X-Auth-Token': FOOTBALL_DATA_TOKEN
+    }
+  });
+
+  const details = await response.text();
+
+  if (!response.ok) {
+    console.error(
+      'ERREUR FOOTBALL-DATA :',
+      response.status,
+      details
+    );
+
+    throw new Error(
+      `Erreur API football (${response.status}) : ${details.slice(0, 300)}`
+    );
+  }
+
+  return JSON.parse(details);
+}
+
   const response = await fetch(API_BASE + path, {
     headers: { 'X-Auth-Token': FOOTBALL_DATA_TOKEN }
   });
