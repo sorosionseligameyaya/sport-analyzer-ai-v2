@@ -1260,3 +1260,62 @@ Réponds en français, de manière claire, professionnelle et structurée.`
     return null;
   }
 }
+
+ // ======================================
+ // CERVEAU IA - OPENROUTER
+ // ======================================
+
+async function askAI(prompt) {
+  const key = process.env.OPENROUTER_API_KEY;
+
+  if (!key) {
+    console.error('Clé OPENROUTER_API_KEY absente.');
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+          messages: [
+            {
+              role: 'system',
+              content: `Tu es SPORT ANALYZER AI, un expert en analyse footballistique.
+Analyse uniquement les données fournies.
+Étudie la forme, l'attaque, la défense, les buts, les tendances et les risques.
+N'invente jamais de statistiques, de résultats ou de probabilités.
+Signale les données manquantes.
+Réponds en français, de manière claire, professionnelle et structurée.`
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.2,
+          max_tokens: 700
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Erreur OpenRouter:', response.status, errorText);
+      return null;
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || null;
+
+  } catch (error) {
+    console.error('Erreur cerveau IA:', error.message);
+    return null;
+  }
+}
