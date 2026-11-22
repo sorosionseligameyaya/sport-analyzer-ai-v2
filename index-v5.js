@@ -537,15 +537,20 @@ async function sendLiveMatches(ctx) {
   let message = '🔴 MATCHS EN DIRECT\n\n';
 
   for (const match of matches) {
-    const home = match.homeTeam.name;
-    const away = match.awayTeam.name;
+    const home = match.homeTeam?.name || 'Équipe domicile';
+    const away = match.awayTeam?.name || 'Équipe extérieure';
 
-    const score = match.score &&
-      match.score.regularTime &&
-      Number.isFinite(match.score.regularTime.home) &&
-      Number.isFinite(match.score.regularTime.away)
-      ? `${match.score.regularTime.home} - ${match.score.regularTime.away}`
-      : 'Score indisponible';
+    // Le score en cours est recherché en priorité dans fullTime.
+    // regularTime sert de solution de secours.
+    const scoreData =
+      match.score?.fullTime ||
+      match.score?.regularTime;
+
+    const score =
+      Number.isFinite(scoreData?.home) &&
+      Number.isFinite(scoreData?.away)
+        ? `${scoreData.home} - ${scoreData.away}`
+        : 'Score indisponible';
 
     const minute = match.minute
       ? `${match.minute} min`
