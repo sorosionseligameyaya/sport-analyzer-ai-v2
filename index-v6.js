@@ -350,7 +350,6 @@ function liveText(matches) {
 ${home} ${homeGoals} - ${awayGoals} ${away}`;
   }).join('\n\n');
 }
-  const data = await footballData('/matches');
 
   return (data.matches || []).filter(m =>
     ['IN_PLAY', 'PAUSED', 'LIVE'].includes(m.status)
