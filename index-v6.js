@@ -1059,3 +1059,82 @@ Tu réponds en français, de manière structurée et professionnelle.`
     return null;
   }
 }
+// ======================================
+// CERVEAU IA - OPENROUTER
+// ======================================
+
+async function askAI(prompt) {
+  const key = process.env.OPENROUTER_API_KEY;
+
+  if (!key) {
+    console.error('Clé OPENROUTER_API_KEY absente.');
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL || 'openrouter/free',
+          messages: [
+            {
+              role: 'system',
+              content: `Tu es SPORT ANALYZER AI, un expert en analyse footballistique.
+
+Tes missions :
+- Analyser les statistiques réelles fournies.
+- Étudier la forme récente des équipes.
+- Évaluer les forces offensives et défensives.
+- Identifier les tendances de buts.
+- Comparer les performances.
+- Identifier les faiblesses et les risques.
+- Produire des analyses claires, structurées et intelligentes.
+
+RÈGLES STRICTES :
+- Ne jamais inventer de statistiques.
+- Ne jamais inventer des résultats ou des informations.
+- Ne pas confondre les matchs réels avec FIFA ou E-Football.
+- Ne pas présenter une supposition comme une certitude.
+- Signaler clairement les données manquantes.
+- Ne pas garantir un résultat.
+- Répondre en français.
+- Être précis, professionnel et concis.`
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.2,
+          max_tokens: 700
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+
+      console.error(
+        'Erreur OpenRouter:',
+        response.status,
+        errorText
+      );
+
+      return null;
+    }
+
+    const data = await response.json();
+
+    return data.choices?.[0]?.message?.content || null;
+
+  } catch (error) {
+    console.error('Erreur cerveau IA:', error.message);
+    return null;
+  }
+}
