@@ -1026,6 +1026,111 @@ async function startBot() {
 }
 
 startBot();
+bot.help(async ctx => {
+  await ctx.reply(helpText());
+});
+
+bot.command('forme', async ctx => {
+  const name = ctx.message.text
+    .replace(/^\/forme(?:@\w+)?\s*/i, '')
+    .trim();
+
+  if (!name) {
+    return ctx.reply('Utilise : /forme Real Madrid');
+  }
+
+  await ctx.reply('🔎 Analyse des statistiques en cours...');
+
+  try {
+    await ctx.reply(await teamReport(name));
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Erreur : ${error.message}`);
+  }
+});
+
+bot.command('foot', async ctx => {
+  const commandText = ctx.message.text
+    .replace(/^\/foot(?:@\w+)?\s*/i, '')
+    .trim();
+
+  const names = splitTeams(commandText);
+
+  if (!names) {
+    return ctx.reply('Utilise : /foot Arsenal vs Chelsea');
+  }
+
+  await ctx.reply('⚔️ Comparaison en cours...');
+
+  try {
+    await ctx.reply(await compareTeams(names));
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Erreur : ${error.message}`);
+  }
+});
+
+bot.command('live', async ctx => {
+  await ctx.reply('🔴 Recherche des matchs en direct...');
+
+  try {
+    await ctx.reply(liveText(await liveMatches()));
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Live indisponible : ${error.message}`);
+  }
+});
+
+bot.command('coupon', async ctx => {
+  await ctx.reply('🎯 Recherche des matchs et des cotes réelles...');
+
+  try {
+    await ctx.reply(await couponSearch());
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Erreur : ${error.message}`);
+  }
+});
+
+bot.command('cotes', async ctx => {
+  await ctx.reply('📊 Recherche des cotes disponibles...');
+
+  try {
+    await ctx.reply(await couponSearch());
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Erreur : ${error.message}`);
+  }
+});
+
+bot.command('fifa', async ctx => {
+  await ctx.reply('🎮 Vérification des données PulseScore...');
+
+  try {
+    await ctx.reply(await pulseDiagnostic(), {
+      disable_web_page_preview: true
+    });
+  } catch (error) {
+    console.error(error);
+    await ctx.reply(`❌ Erreur FIFA : ${error.message}`);
+  }
+});
+
+bot.catch((error, ctx) => {
+  console.error(`Erreur Telegram (${ctx.updateType}) :`, error);
+});
+
+async function startBot() {
+  try {
+    await bot.launch();
+    console.log('SPORT ANALYZER AI démarré sur Telegram.');
+  } catch (error) {
+    console.error('Erreur démarrage Telegram :', error);
+    process.exit(1);
+  }
+}
+
+startBot();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
