@@ -549,15 +549,49 @@ function dateOffset(offset) {
 /* MATCHS EN DIRECT */
 
 async function liveMatches() {
-  const data = await apiFootball('/fixtures?live=all');
+  const url =
+    'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard';
 
-  return data.filter(match =>
-    ['1H', '2H', 'HT', 'ET', 'BT', 'P', 'LIVE'].includes(
-      match.fixture?.status?.short
-    )
-  );
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`ESPN HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  return (data.events || [])
+    .filter(event => {
+      const status = event.status?.type?.state;
+      return status === 'in' || status === 'post';
+    })
+    .map(event => {
+      const competition = event.competitions?.[0];
+      const competitors = competition?.competitors || [];
+
+      const home = competitors.find(team => team.homeAway === 'home');
+      const away = competitors.find(team => team.homeAway === 'away');
+
+      return {
+        teams: {
+          home: { name: home?.team?.displayName || 'Domicile' },
+          away: { name: away?.team?.displayName || 'Extérieur' }
+        },
+        goals: {
+          home: Number(home?.score || 0),
+          away: Number(away?.score || 0)
+        },
+        fixture: {
+          status: {
+            short: event.status?.type?.shortDetail || 'LIVE',
+            elapsed: null
+          }
+        }
+      };
+    });
 }
-
 function liveText(matches) {
   if (!matches || !matches.length) {
     return '🔴 Aucun match en direct actuellement.';
